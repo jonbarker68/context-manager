@@ -1,0 +1,18 @@
+[project]
+name = "context-manager"
+version = "0.1.0"
+description = "Lightweight project context launcher"
+requires-python = ">=3.12"
+dependencies = [
+    "pyyaml"
+]
+
+[project.scripts]
+ctx = "ctx.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctx"]
