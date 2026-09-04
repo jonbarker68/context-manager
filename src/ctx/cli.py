@@ -197,6 +197,7 @@ def open_context(context_id: str) -> None:
         subprocess.Popen(
             [
                 "/Applications/kitty.app/Contents/MacOS/kitty",
+                "--single-instance",
                 "--directory",
                 expand(path),
             ],
@@ -355,6 +356,229 @@ def windows_on_space(label: str) -> list[dict[str, Any]]:
     return yabai("query", "--windows", "--space", label) or []
 
 
+def all_windows() -> list[dict[str, Any]]:
+    """Return all yabai-visible windows."""
+    return yabai("query", "--windows") or []
+
+
+def ensure_new_windows_on_space(
+    target_space: str,
+    existing_window_ids: set[int],
+    timeout: float = 3.0,
+    poll_interval: float = 0.25,
+) -> None:
+    """Move windows created by this context launch onto its allocated Space.
+
+    Some applications choose a display/Space independently of the currently
+    focused Space (Acrobat is one example).  Snapshot the window ids before
+    launching the context, then for a short bounded period watch for newly
+    created windows.  Any new window that appears outside target_space is
+    moved there with yabai.
+
+    This is deliberately best-effort: failure to move one window is reported
+    but does not abort the whole context launch.
+    """
+    deadline = time.monotonic() + timeout
+    handled: set[int] = set()
+
+    while time.monotonic() < deadline:
+        windows = all_windows()
+        target_ids = {
+            window.get("id")
+            for window in windows_on_space(target_space)
+            if window.get("id") is not None
+        }
+
+        for window in windows:
+            window_id = window.get("id")
+
+            if (
+                window_id is None
+                or window_id in existing_window_ids
+                or window_id in handled
+            ):
+                continue
+
+            handled.add(window_id)
+
+            if window_id in target_ids:
+                continue
+
+            try:
+                yabai("window", str(window_id), "--space", target_space)
+            except RuntimeError as exc:
+                print(
+                    f"Warning: could not move new "
+                    f"{window.get('app', '?')} window to {target_space}: {exc}",
+                    file=sys.stderr,
+                )
+
+        time.sleep(poll_interval)
+
+
+def reconcile_space_topology() -> None:
+    """
+    Ensure ctx Space labels match the current display topology.
+
+    Expected layouts:
+
+    One display:
+        main, ctx-1, ctx-2, ctx-3, ctx-4
+
+    Two displays:
+        display 1: auxiliary
+        display 2: main, ctx-1, ctx-2, ctx-3, ctx-4
+
+    macOS moves the four persistent context Spaces between displays when
+    an external display is connected/disconnected. We therefore only need
+    to repair their semantic labels.
+    """
+    spaces = yabai("query", "--spaces") or []
+    displays = yabai("query", "--displays") or []
+
+    if len(displays) == 1:
+        display_spaces = sorted(
+            (
+                space
+                for space in spaces
+                if space.get("display") == displays[0].get("index")
+            ),
+            key=lambda space: space["index"],
+        )
+
+        if len(display_spaces) != 5:
+            raise SystemExit(
+                "Unexpected Space layout for one display: "
+                f"expected 5 Spaces, found {len(display_spaces)}.\n"
+                "Refusing to relabel Spaces automatically."
+            )
+
+        desired_labels = [
+            "main",
+            "ctx-1",
+            "ctx-2",
+            "ctx-3",
+            "ctx-4",
+        ]
+
+        for space, desired_label in zip(display_spaces, desired_labels):
+            if space.get("label") != desired_label:
+                yabai(
+                    "space",
+                    str(space["index"]),
+                    "--label",
+                    desired_label,
+                )
+
+        return
+
+    if len(displays) == 2:
+        # The built-in laptop display is display 1 in the topology we have
+        # observed, and the external monitor is display 2.
+        #
+        # More importantly, our desired topology is unambiguous:
+        # one display has exactly one Space (auxiliary), while the other
+        # has exactly five Spaces (main + four context Spaces).
+
+        spaces_by_display: dict[int, list[dict[str, Any]]] = {}
+
+        for space in spaces:
+            display_index = space.get("display")
+            spaces_by_display.setdefault(display_index, []).append(space)
+
+        for display_spaces in spaces_by_display.values():
+            display_spaces.sort(key=lambda space: space["index"])
+
+        auxiliary_candidates = [
+            display_spaces
+            for display_spaces in spaces_by_display.values()
+            if len(display_spaces) == 1
+        ]
+
+        context_candidates = [
+            display_spaces
+            for display_spaces in spaces_by_display.values()
+            if len(display_spaces) == 5
+        ]
+
+        if len(auxiliary_candidates) != 1 or len(context_candidates) != 1:
+            counts = sorted(
+                len(display_spaces) for display_spaces in spaces_by_display.values()
+            )
+
+            raise SystemExit(
+                "Unexpected Space layout for two displays: "
+                f"found {counts} Spaces per display; expected [1, 5].\n"
+                "Refusing to relabel Spaces automatically."
+            )
+
+        auxiliary_space = auxiliary_candidates[0][0]
+        context_spaces = context_candidates[0]
+
+        if auxiliary_space.get("label") != "auxiliary":
+            yabai(
+                "space",
+                str(auxiliary_space["index"]),
+                "--label",
+                "auxiliary",
+            )
+
+        desired_labels = [
+            "main",
+            "ctx-1",
+            "ctx-2",
+            "ctx-3",
+            "ctx-4",
+        ]
+
+        for space, desired_label in zip(context_spaces, desired_labels):
+            if space.get("label") != desired_label:
+                yabai(
+                    "space",
+                    str(space["index"]),
+                    "--label",
+                    desired_label,
+                )
+
+        return
+
+    raise SystemExit(
+        f"ctx currently supports one or two displays; found {len(displays)}."
+    )
+
+
+def reconcile_space_state() -> dict[str, str]:
+    """Reconcile cached context assignments with the actual Space contents.
+
+    spaces.json records which context a managed Space belongs to, which cannot be
+    reconstructed from yabai alone.  Yabai is used to validate the physical state:
+    an assignment with no windows is stale and is removed.
+    """
+    state = load_space_state()
+    changed = False
+
+    for space, context_id in list(state.items()):
+        # Ignore any obsolete/non-managed entries rather than using them for
+        # allocation decisions.
+        if space not in CTX_SPACES:
+            del state[space]
+            changed = True
+            continue
+
+        if not windows_on_space(space):
+            print(
+                f"Removing stale assignment: {space} -> {context_id}",
+                file=sys.stderr,
+            )
+            del state[space]
+            changed = True
+
+    if changed:
+        save_space_state(state)
+
+    return state
+
+
 def window_exists(window_id: int) -> bool:
     """Return True if yabai can still see the given window."""
     windows = yabai("query", "--windows") or []
@@ -362,23 +586,43 @@ def window_exists(window_id: int) -> bool:
 
 
 def _applescript_string(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('\"', '\\\"')
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
-def close_window_via_accessibility(window: dict[str, Any]) -> bool:
-    """Accessibility fallback for windows that yabai cannot close."""
-    window_id = window.get("id")
+def app_window_count_on_space(space_label: str, app_name: str) -> int:
+    """Return the number of yabai-visible windows for an app on one Space."""
+    return sum(
+        1
+        for window in windows_on_space(space_label)
+        if window.get("app") == app_name
+    )
+
+
+def close_window_via_accessibility(
+    window: dict[str, Any],
+    space_label: str,
+) -> bool:
+    """Close one app window via macOS Accessibility.
+
+    Some applications (notably VS Code in some states, and Acrobat) expose
+    windows that yabai can enumerate but cannot address by window id.  Do not
+    try to focus the yabai id here: that is precisely the operation that may
+    fail.  Instead, while still on the context Space, make the application
+    frontmost and close its front window through System Events.
+
+    Success is verified by checking that the number of that application's
+    windows on the context Space decreases.
+    """
     app_name = window.get("app") or ""
 
-    if window_id is None or not app_name:
+    if not app_name:
         return False
 
-    try:
-        yabai("window", str(window_id), "--focus")
-    except RuntimeError:
-        return False
+    before = app_window_count_on_space(space_label, app_name)
+    if before == 0:
+        # The captured window has already disappeared.
+        return True
 
-    time.sleep(0.15)
     app = _applescript_string(app_name)
 
     script = f'''
@@ -408,11 +652,17 @@ def close_window_via_accessibility(window: dict[str, Any]) -> bool:
         )
         return False
 
-    time.sleep(0.25)
-    return not window_exists(window_id)
+    # Give the application/yabai a moment to observe the closed window.
+    for _ in range(5):
+        time.sleep(0.1)
+        after = app_window_count_on_space(space_label, app_name)
+        if after < before:
+            return True
+
+    return False
 
 
-def close_window(window: dict[str, Any]) -> bool:
+def close_window(window: dict[str, Any], space_label: str) -> bool:
     """Close one macOS window without quitting its application."""
     window_id = window.get("id")
 
@@ -427,7 +677,7 @@ def close_window(window: dict[str, Any]) -> bool:
     except RuntimeError:
         pass
 
-    return close_window_via_accessibility(window)
+    return close_window_via_accessibility(window, space_label)
 
 
 # ----------------------------------------------------------------------
@@ -444,8 +694,28 @@ def list_contexts() -> None:
         print(f"{context_id:30} {name:30} {description}")
 
 
-def alfred_calendar_items() -> list[dict[str, Any]]:
+def alfred_open_contexts() -> dict[str, str]:
+    """
+    Return a context_id -> Space mapping for Alfred display purposes.
+
+    This deliberately reads spaces.json without reconciling it against yabai:
+    Alfred may invoke the Script Filter repeatedly while the user types, so we
+    keep this path cheap and side-effect free. Context activation performs the
+    authoritative reconciliation before acting.
+    """
+    state = load_space_state()
+    return {
+        context_id: space
+        for space, context_id in state.items()
+        if space in CTX_SPACES
+    }
+
+
+def alfred_calendar_items(
+    open_contexts: dict[str, str] | None = None,
+) -> list[dict[str, Any]]:
     now = datetime.now(timezone.utc)
+    open_contexts = open_contexts or {}
 
     candidates = []
 
@@ -512,13 +782,18 @@ def alfred_calendar_items() -> list[dict[str, Any]]:
         else:
             title = f"LATER — {event_time} {event_title}"
 
+        open_space = open_contexts.get(context_id)
+        subtitle = context_name
+        if open_space:
+            subtitle = f"OPEN — {open_space} · {context_name}"
+
         items.append(
             {
                 "uid": (
                     f"calendar:{event.get('start', '')}:{context_id}:{event_title}"
                 ),
                 "title": title,
-                "subtitle": context_name,
+                "subtitle": subtitle,
                 "arg": context_id,
                 "valid": True,
                 "match": " ".join(
@@ -538,11 +813,12 @@ def alfred_calendar_items() -> list[dict[str, Any]]:
 
 def alfred_contexts(query: str = "") -> None:
     query = query.strip().lower()
+    open_contexts = alfred_open_contexts()
 
     items = []
 
     try:
-        items.extend(alfred_calendar_items())
+        items.extend(alfred_calendar_items(open_contexts))
     except Exception as exc:
         print(
             f"Warning: unable to read calendar contexts: {exc}",
@@ -566,11 +842,16 @@ def alfred_contexts(query: str = "") -> None:
         if query and query not in searchable:
             continue
 
+        open_space = open_contexts.get(context_id)
+        subtitle = description or context_id
+        if open_space:
+            subtitle = f"OPEN — {open_space} · {subtitle}"
+
         items.append(
             {
                 "uid": context_id,
                 "title": name,
-                "subtitle": description or context_id,
+                "subtitle": subtitle,
                 "arg": context_id,
                 "autocomplete": context_id,
                 "match": searchable,
@@ -588,6 +869,76 @@ def alfred_contexts(query: str = "") -> None:
     )
 
 
+def alfred_close_contexts(query: str = "") -> None:
+    """Emit Alfred Script Filter JSON for currently open contexts only.
+
+    When Alfred is invoked from a managed context Space, put that context first
+    so bare ``cc`` + Return remains the fast "close the context I'm in" action.
+    """
+    query = query.strip().lower()
+    open_contexts = alfred_open_contexts()
+
+    try:
+        current_space = get_current_space()
+        current_space_label = current_space.get("label", "")
+    except Exception:
+        # Alfred listing should remain useful even if yabai has a transient
+        # query failure. In that case we simply omit CURRENT prioritisation.
+        current_space_label = ""
+
+    current_context_id = next(
+        (
+            context_id
+            for context_id, space in open_contexts.items()
+            if space == current_space_label
+        ),
+        None,
+    )
+
+    items = []
+
+    for ctx in iter_contexts():
+        context_id = ctx["_id"]
+        space = open_contexts.get(context_id)
+        if not space:
+            continue
+
+        name = ctx.get("name", context_id)
+        description = ctx.get("description", "")
+        searchable = " ".join([context_id, name, description, space]).lower()
+
+        if query and query not in searchable:
+            continue
+
+        is_current = context_id == current_context_id
+
+        subtitle = f"CURRENT — {space}" if is_current else f"OPEN — {space}"
+        if description:
+            subtitle += f" · {description}"
+
+        items.append(
+            {
+                "uid": f"close:{context_id}",
+                "title": name,
+                "subtitle": subtitle,
+                "arg": context_id,
+                "autocomplete": context_id,
+                "match": searchable,
+                "valid": True,
+                "_is_current": is_current,
+            }
+        )
+
+    # Current context always wins the default Alfred selection.  Remaining
+    # contexts retain their existing order.
+    items.sort(key=lambda item: 0 if item["_is_current"] else 1)
+
+    for item in items:
+        item.pop("_is_current", None)
+
+    print(json.dumps({"skipknowledge": True, "items": items}))
+
+
 def activate_context(context_id: str) -> None:
     # Validate the context before allocating a Space.
     context_file = CONTEXT_DIR / f"{context_id}.md"
@@ -595,7 +946,10 @@ def activate_context(context_id: str) -> None:
     if not context_file.exists():
         raise SystemExit(f"Unknown context: {context_id}")
 
-    state = load_space_state()
+    # First repair semantic Space labels following any display change.
+    reconcile_space_topology()
+
+    state = reconcile_space_state()
 
     # Is this context already open? Verify that the recorded Space still
     # contains windows; repair stale state left by an interrupted close.
@@ -611,18 +965,36 @@ def activate_context(context_id: str) -> None:
         state.pop(space, None)
         save_space_state(state)
 
-    # Otherwise allocate a free context Space.
+    # Otherwise allocate a genuinely empty context Space.  A Space that is not
+    # in spaces.json but still contains windows is occupied/unknown and must not
+    # be reused.
     free_space = next(
-        (space for space in CTX_SPACES if space not in state),
+        (
+            space
+            for space in CTX_SPACES
+            if space not in state and not windows_on_space(space)
+        ),
         None,
     )
 
     if free_space is None:
         raise SystemExit(
-            "No free context Spaces.\nClose an existing context with 'ctx close'."
+            "No free context Spaces.\n"
+            "Close an existing context with 'ctx close', or clear windows from an "
+            "unmanaged context Space."
         )
 
     focus_space(free_space)
+
+    # Snapshot existing windows before launching. Some applications (notably
+    # Acrobat) may create their new window on another display/Space even though
+    # free_space is focused. We will move only windows that appear after this
+    # snapshot, leaving all pre-existing windows untouched.
+    existing_window_ids = {
+        window.get("id")
+        for window in all_windows()
+        if window.get("id") is not None
+    }
 
     # Record allocation before launching, so a partially failed
     # launch doesn't accidentally allow this Space to be reused.
@@ -631,6 +1003,7 @@ def activate_context(context_id: str) -> None:
 
     try:
         open_context(context_id)
+        ensure_new_windows_on_space(free_space, existing_window_ids)
     except Exception:
         state.pop(free_space, None)
         save_space_state(state)
@@ -639,33 +1012,62 @@ def activate_context(context_id: str) -> None:
     print(f"Opened {context_id} on {free_space}")
 
 
-def close_current_context() -> None:
-    current_space = get_current_space()
-    space_label = current_space.get("label", "")
+def close_context(context_id: str | None = None) -> None:
+    """Close a managed context.
 
-    if space_label not in CTX_SPACES:
-        raise SystemExit(
-            "Current Space is not a managed context Space; "
-            "refusing to close its windows."
-        )
+    With no context_id, close the context on the current Space and return to
+    main (the historical `ctx close` behaviour). With a context_id, locate its
+    assigned Space, close it, and return to the Space that was active when the
+    command started.
+    """
+    reconcile_space_topology()
 
+    original_space = get_current_space()
+    original_label = original_space.get("label", "")
     state = load_space_state()
-    context_id = state.get(space_label)
 
-    if not context_id:
-        raise SystemExit(f"{space_label} is not currently assigned to a context.")
+    if context_id is None:
+        space_label = original_label
+        if space_label not in CTX_SPACES:
+            raise SystemExit(
+                "Current Space is not a managed context Space; "
+                "refusing to close its windows."
+            )
 
-    windows = windows_on_current_space()
+        context_id = state.get(space_label)
+        if not context_id:
+            raise SystemExit(f"{space_label} is not currently assigned to a context.")
 
-    # Release the allocation BEFORE closing anything. One of these windows
-    # may be the terminal that is currently running this command.
+        return_label = "main"
+    else:
+        # Validate the named context so typos fail clearly.
+        context_file = CONTEXT_DIR / f"{context_id}.md"
+        if not context_file.exists():
+            raise SystemExit(f"Unknown context: {context_id}")
+
+        space_label = next(
+            (space for space, active_context in state.items() if active_context == context_id),
+            None,
+        )
+        if not space_label:
+            raise SystemExit(f"Context '{context_id}' is not currently open.")
+
+        return_label = original_label or "main"
+
+    # Capture the target Space's windows before changing focus. Accessibility
+    # fallback requires that Space to be active, so focus it briefly if needed.
+    windows = windows_on_space(space_label)
+    if original_label != space_label:
+        focus_space(space_label)
+
+    # Release the allocation BEFORE closing anything. A terminal window on the
+    # target Space may otherwise terminate a command launched from that Space.
     state.pop(space_label, None)
     save_space_state(state)
 
     print(f"Released {context_id} from {space_label}")
 
     terminal_apps = {"kitty", "Terminal", "iTerm2"}
-
     ordinary_windows = [
         window for window in windows if window.get("app") not in terminal_apps
     ]
@@ -673,29 +1075,28 @@ def close_current_context() -> None:
         window for window in windows if window.get("app") in terminal_apps
     ]
 
-    # The Accessibility fallback may focus a stubborn window and therefore
-    # temporarily switch us back to the context Space. Process all ordinary
-    # windows before finally returning to main.
     failures = []
-
     for window in ordinary_windows:
-        if not close_window(window):
+        if not close_window(window, space_label):
             failures.append(window)
 
-    # Return to main before closing terminal windows; one of those terminal
-    # windows may contain the process currently running ctx close.
-    yabai("space", "--focus", "main")
-    time.sleep(0.5)
+    # Return before closing terminal windows. For a remote close this restores
+    # the user's original workspace; for bare `ctx close` it preserves the
+    # established behaviour of returning to main.
+    try:
+        yabai("space", "--focus", return_label)
+        time.sleep(0.5)
+    except RuntimeError:
+        # If a label disappeared during a display change, main is the safest
+        # fallback.
+        if return_label != "main":
+            yabai("space", "--focus", "main")
+            time.sleep(0.5)
 
-    # Do not use the Cmd-W fallback for terminal windows. Focusing the terminal
-    # would switch back to the context Space immediately before destroying the
-    # process that is running this command.
     for window in terminal_windows:
         window_id = window.get("id")
-
         if window_id is None:
             continue
-
         try:
             yabai("window", str(window_id), "--close")
         except RuntimeError:
@@ -710,6 +1111,11 @@ def close_current_context() -> None:
             )
 
 
+def close_current_context() -> None:
+    """Backward-compatible wrapper for the original no-argument close."""
+    close_context()
+
+
 def usage() -> None:
     print(
         """Usage:
@@ -721,10 +1127,15 @@ def usage() -> None:
       Show the current Calendar event and associated context.
 
   ctx alfred [query]
-      Emit Alfred Script Filter JSON.
+      Emit Alfred Script Filter JSON for opening/switching contexts.
 
-  ctx close
-      Close windows on the current managed context Space and release it.
+  ctx alfred-close [query]
+      Emit Alfred Script Filter JSON for currently open contexts.
+
+  ctx close [context-id]
+      With no context id, close the context on the current managed Space and
+      return to main. With a context id, close that context wherever it is
+      open and return to the previously active Space.
 
   ctx <context-id>
       Open or switch to a context.
@@ -735,7 +1146,9 @@ Examples:
   ctx now
   ctx teaching-com413
   ctx close
+  ctx close teaching-com413
   ctx alfred com
+  ctx alfred-close com
 """
     )
 
@@ -764,8 +1177,14 @@ def main() -> None:
         alfred_contexts(query)
         return
 
+    if command == "alfred-close":
+        query = " ".join(sys.argv[2:])
+        alfred_close_contexts(query)
+        return
+
     if command == "close":
-        close_current_context()
+        context_id = sys.argv[2] if len(sys.argv) > 2 else None
+        close_context(context_id)
         return
 
     return activate_context(command)
