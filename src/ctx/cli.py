@@ -141,6 +141,33 @@ def normalise_url(item: Any) -> tuple[str, str]:
     raise ValueError(f"Invalid URL entry: {item}")
 
 
+def normalise_chatgpt(item: Any) -> str:
+    """Return the ChatGPT project URL from a context's `chatgpt` entry.
+
+    Supported forms:
+
+        chatgpt: https://chatgpt.com/g/...
+
+    or, for a more explicit/future-proof form:
+
+        chatgpt:
+          project: https://chatgpt.com/g/...
+
+    Keeping this separate from `urls` lets us later change ChatGPT launching
+    (for example to use the desktop app) without changing context files.
+    """
+    if isinstance(item, str):
+        return item
+
+    if isinstance(item, dict):
+        project = item.get("project")
+        if not project:
+            raise ValueError(f"ChatGPT entry has no 'project': {item}")
+        return project
+
+    raise ValueError(f"Invalid ChatGPT entry: {item}")
+
+
 def normalise_file(item: Any) -> tuple[str, str]:
     if isinstance(item, str):
         path = expand(item)
@@ -223,6 +250,17 @@ def open_context(context_id: str) -> None:
         if url not in seen_urls:
             urls.append(url)
             seen_urls.add(url)
+
+    # ChatGPT is deliberately a separate context resource rather than just
+    # another generic URL. For now its project URL is opened as another tab in
+    # the context's Chrome window. Later this can be redirected to the ChatGPT
+    # desktop app without requiring context-file changes.
+    chatgpt = ctx.get("chatgpt")
+    if chatgpt:
+        chatgpt_url = normalise_chatgpt(chatgpt)
+        if chatgpt_url not in seen_urls:
+            urls.append(chatgpt_url)
+            seen_urls.add(chatgpt_url)
 
     if urls:
         chrome = Path(
