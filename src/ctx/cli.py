@@ -204,11 +204,43 @@ def open_context(context_id: str) -> None:
             start_new_session=True,
         )
 
+    # Open all context URLs together in one fresh Chrome window.
+    #
+    # Opening URLs one-by-one with macOS `open` lets Chrome decide how to
+    # reuse/recreate windows. In particular, when Chrome has no open windows it
+    # can revive a previously closed window and then add the new URLs to it,
+    # which causes context tabs to accumulate across open/close cycles.
+    #
+    # Instead, treat the context file as authoritative: deduplicate its URLs
+    # while preserving order, then ask Chrome for one new window containing
+    # exactly those tabs.
+    urls = []
+    seen_urls = set()
+
     for item in ctx.get("urls", []):
         _, url = normalise_url(item)
 
+        if url not in seen_urls:
+            urls.append(url)
+            seen_urls.add(url)
+
+    if urls:
+        chrome = Path(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        )
+
+        if not chrome.exists():
+            raise SystemExit(
+                "Google Chrome is required for context URLs but was not found "
+                "in /Applications."
+            )
+
         subprocess.Popen(
-            ["open", url],
+            [
+                str(chrome),
+                "--new-window",
+                *urls,
+            ],
             start_new_session=True,
         )
 
