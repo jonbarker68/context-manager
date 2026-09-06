@@ -4,6 +4,8 @@ import json
 import os
 import re
 import shutil
+import secrets
+import difflib
 import subprocess
 import sys
 import time
@@ -20,6 +22,8 @@ CALENDAR_QUERY = PROJECT_ROOT / "native" / "calendar-query" / "calendar-query"
 
 STATE_DIR = Path("~/.local/share/ctx").expanduser()
 STATE_FILE = STATE_DIR / "spaces.json"
+
+ALFRED_CALENDAR_DAYS = 4  # today + next three days
 
 CTX_SPACES = [
     "ctx-1",
@@ -90,12 +94,8 @@ def calendar_event_distance(event: dict[str, Any], now: datetime) -> float:
     return (start - now).total_seconds()
 
 
-def read_context(context_id: str) -> dict[str, Any]:
-    path = CONTEXT_DIR / f"{context_id}.md"
-
-    if not path.exists():
-        raise SystemExit(f"Unknown context: {context_id}")
-
+def _read_context_path(path: Path) -> dict[str, Any]:
+    """Read one context descriptor from Markdown/YAML front matter."""
     text = path.read_text()
 
     if not text.startswith("---"):
@@ -107,20 +107,257 @@ def read_context(context_id: str) -> dict[str, Any]:
         raise SystemExit(f"Invalid front matter in {path}")
 
     data = yaml.safe_load(parts[1]) or {}
-    data["_id"] = context_id
+    stable_id = data.get("id")
+
+    # Legacy descriptors pre-date immutable ids. They remain readable so the
+    # migration can be incremental, but directory markers are only written for
+    # contexts that have a real id.
+    data["_id"] = stable_id or path.stem
+    data["_stable_id"] = stable_id
+    data["_file_key"] = path.stem
     data["_path"] = path
+
+    aliases = data.get("aliases", []) or []
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    data["_aliases"] = [str(alias) for alias in aliases]
 
     return data
 
 
 def iter_contexts():
-    for path in sorted(CONTEXT_DIR.glob("*.md")):
-        context_id = path.stem
-
+    # rglob is deliberately used here: filenames and directory hierarchy are
+    # storage details, not context identity.
+    for path in sorted(CONTEXT_DIR.rglob("*.md")):
         try:
-            yield read_context(context_id)
+            yield _read_context_path(path)
         except Exception as exc:
             print(f"Warning: unable to read {path}: {exc}", file=sys.stderr)
+
+
+def _context_terms(ctx: dict[str, Any]) -> list[str]:
+    terms = [
+        str(ctx.get("_id", "")),
+        str(ctx.get("_file_key", "")),
+        str(ctx.get("name", "")),
+        *ctx.get("_aliases", []),
+    ]
+    return [term for term in terms if term]
+
+
+def resolve_context(query: str, *, fuzzy: bool = True) -> dict[str, Any]:
+    """Resolve a user-facing context reference to one descriptor.
+
+    Resolution order is intentionally conservative:
+      1. exact id / filename / name / alias (case-insensitive)
+      2. unique substring match
+      3. unique close fuzzy match
+
+    The immutable id is therefore never something the user needs to type.
+    """
+    query = query.strip()
+    if not query:
+        raise SystemExit("Context name cannot be empty.")
+
+    contexts = list(iter_contexts())
+    q = query.casefold()
+
+    exact = [
+        ctx
+        for ctx in contexts
+        if any(term.casefold() == q for term in _context_terms(ctx))
+    ]
+
+    if len(exact) == 1:
+        return exact[0]
+    if len(exact) > 1:
+        _raise_ambiguous_context(query, exact)
+
+    if not fuzzy:
+        raise SystemExit(f"Unknown context: {query}")
+
+    substring = [
+        ctx
+        for ctx in contexts
+        if any(q in term.casefold() for term in _context_terms(ctx))
+    ]
+
+    if len(substring) == 1:
+        return substring[0]
+    if len(substring) > 1:
+        _raise_ambiguous_context(query, substring)
+
+    scored: list[tuple[float, dict[str, Any]]] = []
+    for ctx in contexts:
+        score = max(
+            (difflib.SequenceMatcher(None, q, term.casefold()).ratio()
+             for term in _context_terms(ctx)),
+            default=0.0,
+        )
+        if score >= 0.6:
+            scored.append((score, ctx))
+
+    scored.sort(key=lambda item: item[0], reverse=True)
+    if scored:
+        best_score = scored[0][0]
+        best = [ctx for score, ctx in scored if best_score - score < 0.08]
+        if len(best) == 1:
+            return best[0]
+        _raise_ambiguous_context(query, best)
+
+    raise SystemExit(f"Unknown context: {query}")
+
+
+def _raise_ambiguous_context(query: str, contexts: list[dict[str, Any]]) -> None:
+    lines = [f"Ambiguous context '{query}'. Matches:"]
+    for ctx in contexts[:10]:
+        name = ctx.get("name", ctx.get("_file_key", "(unnamed)"))
+        aliases = ctx.get("_aliases", [])
+        suffix = f" (aliases: {', '.join(aliases)})" if aliases else ""
+        lines.append(f"  {name}{suffix}")
+    raise SystemExit("\n".join(lines))
+
+
+def read_context(context_ref: str) -> dict[str, Any]:
+    """Backward-compatible reader accepting id, filename, name, or alias."""
+    return resolve_context(context_ref)
+
+
+def context_id_fn(ctx: dict[str, Any]) -> str:
+    return str(ctx["_id"])
+
+
+def require_stable_id(ctx: dict[str, Any]) -> str:
+    stable_id = ctx.get("_stable_id")
+    if not stable_id:
+        name = ctx.get("name", ctx.get("_file_key", "(unnamed)"))
+        raise SystemExit(
+            f"Context '{name}' has no immutable id yet.\n"
+            "Run 'ctx ensure-ids' once to add ids to legacy context files."
+        )
+    return str(stable_id)
+
+
+def generate_context_id(existing: set[str]) -> str:
+    while True:
+        candidate = secrets.token_hex(6)
+        if candidate not in existing:
+            return candidate
+
+
+def ensure_context_ids() -> None:
+    """Add an immutable random id to any legacy context descriptor."""
+    contexts = list(iter_contexts())
+    existing = {
+        str(ctx["_stable_id"])
+        for ctx in contexts
+        if ctx.get("_stable_id")
+    }
+    changed = 0
+
+    for ctx in contexts:
+        if ctx.get("_stable_id"):
+            continue
+
+        path = ctx["_path"]
+        text = path.read_text()
+        parts = text.split("---", 2)
+        new_id = generate_context_id(existing)
+        existing.add(new_id)
+
+        # Insert the id without serialising the YAML again. Context descriptors
+        # are human-maintained files, so comments, quoting and formatting must
+        # survive migration untouched.
+        front_matter = parts[1]
+        if front_matter.startswith("\n"):
+            front_matter = f"\nid: {new_id}" + front_matter
+        else:
+            front_matter = f"\nid: {new_id}\n" + front_matter
+        path.write_text(f"---{front_matter}---{parts[2]}")
+        print(f"{ctx.get('name', path.stem)}: {new_id}")
+        changed += 1
+
+    if changed == 0:
+        print("All contexts already have immutable ids.")
+    else:
+        print(f"Added immutable ids to {changed} context(s).")
+
+
+def edit_context(context_ref: str) -> None:
+    ctx = resolve_context(context_ref)
+    subprocess.Popen(
+        [find_code(), str(ctx["_path"])],
+        start_new_session=True,
+    )
+    print(f"Editing {ctx.get('name', ctx['_file_key'])}: {ctx['_path']}")
+
+
+def find_context_marker(start: Path | None = None) -> Path | None:
+    directory = (start or Path.cwd()).resolve()
+    for candidate_dir in (directory, *directory.parents):
+        marker = candidate_dir / ".ctx"
+        if marker.is_file():
+            return marker
+    return None
+
+
+def read_context_marker(marker: Path) -> str:
+    text = marker.read_text().strip()
+    if not text:
+        raise SystemExit(f"Empty context marker: {marker}")
+
+    # Current format is tiny YAML, but accept a bare id as a convenience.
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise SystemExit(f"Invalid context marker {marker}: {exc}")
+
+    if isinstance(data, str):
+        return data
+    if isinstance(data, dict) and data.get("context"):
+        return str(data["context"])
+
+    raise SystemExit(f"Invalid context marker {marker}: expected 'context: <id>'.")
+
+
+def mark_context(context_ref: str) -> None:
+    ctx = resolve_context(context_ref)
+    stable_id = require_stable_id(ctx)
+    marker = Path.cwd() / ".ctx"
+
+    if marker.exists():
+        old_ref = read_context_marker(marker)
+        try:
+            old_ctx = resolve_context(old_ref, fuzzy=False)
+            old_name = old_ctx.get("name", old_ref)
+        except SystemExit:
+            old_name = old_ref
+        raise SystemExit(
+            f"{marker} already exists and points to '{old_name}'.\n"
+            "Remove it first if you want to change this directory's context."
+        )
+
+    marker.write_text(f"context: {stable_id}\n")
+    print(f"Marked {Path.cwd()} as {ctx.get('name', ctx['_file_key'])}")
+
+
+def unmark_context() -> None:
+    marker = Path.cwd() / ".ctx"
+    if not marker.exists():
+        raise SystemExit(f"No .ctx marker in {Path.cwd()}")
+    marker.unlink()
+    print(f"Removed {marker}")
+
+
+def activate_here() -> None:
+    marker = find_context_marker()
+    if marker is None:
+        raise SystemExit("No .ctx marker found in this directory or any parent.")
+
+    stable_id = read_context_marker(marker)
+    ctx = resolve_context(stable_id, fuzzy=False)
+    print(f"Found {ctx.get('name', ctx['_file_key'])} via {marker}")
+    activate_context(context_id_fn(ctx))
 
 
 def expand(path: str) -> str:
@@ -291,16 +528,19 @@ def open_context(context_id: str) -> None:
         )
 
 
-def get_current_calendar_events() -> list[dict[str, Any]]:
+def get_calendar_events(days: int = 1) -> list[dict[str, Any]]:
+    """Return non-all-day Calendar events from today across ``days`` days."""
     if not CALENDAR_QUERY.exists():
         raise SystemExit(
             f"Calendar helper not found:\n"
             f"  {CALENDAR_QUERY}\n\n"
-            "Build it before using 'ctx now'."
+            "Build it before using Calendar integration."
         )
 
+    days = max(1, int(days))
+
     result = subprocess.run(
-        [str(CALENDAR_QUERY)],
+        [str(CALENDAR_QUERY), str(days)],
         capture_output=True,
         text=True,
     )
@@ -330,36 +570,354 @@ def extract_context_id(text: str) -> str | None:
     return None
 
 
+def calendar_aliases(ctx: dict[str, Any]) -> list[str]:
+    """Legacy Calendar title aliases.
+
+    ``calendar.aliases`` remains supported as shorthand for a title-only
+    ``any`` rule. New configurations should generally prefer ``calendar.match``.
+    """
+    calendar = ctx.get("calendar") or {}
+    if not isinstance(calendar, dict):
+        return []
+
+    aliases = calendar.get("aliases", []) or []
+    if isinstance(aliases, str):
+        aliases = [aliases]
+
+    return [
+        str(alias).strip()
+        for alias in aliases
+        if str(alias).strip()
+    ]
+
+
+def event_attendee_emails(event: dict[str, Any]) -> list[str]:
+    """Return normalised attendee email addresses from Calendar JSON."""
+    values = event.get("attendees") or []
+    if isinstance(values, str):
+        values = [values]
+
+    result = []
+    for value in values:
+        email = str(value).strip().casefold()
+        if email.startswith("mailto:"):
+            email = email[7:]
+        if email:
+            result.append(email)
+
+    return result
+
+
+def _match_calendar_leaf(
+    event: dict[str, Any],
+    key: str,
+    value: Any,
+) -> tuple[bool, list[str]]:
+    """Evaluate one Calendar matching predicate."""
+    if key == "title":
+        needle = str(value).strip()
+        if not needle:
+            return False, []
+        matched = needle.casefold() in str(event.get("title") or "").casefold()
+        return matched, [f"title contains '{needle}'"] if matched else []
+
+    if key in {"attendee", "guest"}:
+        needle = str(value).strip().casefold()
+        if needle.startswith("mailto:"):
+            needle = needle[7:]
+        if not needle:
+            return False, []
+
+        attendees = event_attendee_emails(event)
+        matched = needle in attendees
+        return matched, [f"attendee {needle}"] if matched else []
+
+    if key == "calendar":
+        needle = str(value).strip()
+        if not needle:
+            return False, []
+        matched = needle.casefold() in str(event.get("calendar") or "").casefold()
+        return matched, [f"calendar contains '{needle}'"] if matched else []
+
+    return False, []
+
+
+def match_calendar_rule(
+    event: dict[str, Any],
+    rule: Any,
+) -> tuple[bool, list[str]]:
+    """Evaluate a recursive Calendar match expression.
+
+    Supported forms:
+
+        match:
+          attendee: person@example.com
+
+        match:
+          any:
+            - attendee: person@example.com
+            - title: Thomas
+
+        match:
+          all:
+            - attendee: person@example.com
+            - any:
+                - title: supervision
+                - title: progress
+
+    ``any`` is boolean OR; ``all`` is boolean AND. Leaf predicates currently
+    support ``attendee`` (or ``guest``), ``title`` and ``calendar``.
+    """
+    if not isinstance(rule, dict) or not rule:
+        return False, []
+
+    if "any" in rule:
+        children = rule.get("any") or []
+        if not isinstance(children, list):
+            children = [children]
+
+        evidence: list[str] = []
+        matched_any = False
+        for child in children:
+            matched, child_evidence = match_calendar_rule(event, child)
+            if matched:
+                matched_any = True
+                evidence.extend(child_evidence)
+
+        return matched_any, evidence
+
+    if "all" in rule:
+        children = rule.get("all") or []
+        if not isinstance(children, list):
+            children = [children]
+
+        evidence: list[str] = []
+        for child in children:
+            matched, child_evidence = match_calendar_rule(event, child)
+            if not matched:
+                return False, []
+            evidence.extend(child_evidence)
+
+        return bool(children), evidence
+
+    # Allow a compact dictionary of leaf predicates as implicit AND:
+    #
+    #   match:
+    #     attendee: person@example.com
+    #     title: supervision
+    evidence: list[str] = []
+    saw_leaf = False
+
+    for key, value in rule.items():
+        if key not in {"title", "attendee", "guest", "calendar"}:
+            continue
+
+        saw_leaf = True
+        matched, leaf_evidence = _match_calendar_leaf(event, key, value)
+        if not matched:
+            return False, []
+        evidence.extend(leaf_evidence)
+
+    return saw_leaf, evidence
+
+
+def calendar_match_rule(ctx: dict[str, Any]) -> Any:
+    """Return a context's explicit Calendar matching rule, if present."""
+    calendar = ctx.get("calendar") or {}
+    if not isinstance(calendar, dict):
+        return None
+    return calendar.get("match")
+
+
+def resolve_calendar_event(
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    """Resolve one Calendar event to a context, conservatively.
+
+    Resolution order:
+      1. explicit ``ctx:`` in event notes (authoritative override);
+      2. unique match against ``calendar.match`` rules;
+      3. legacy unique title match against ``calendar.aliases``;
+      4. unresolved/ambiguous result -- never guess.
+    """
+    notes = event.get("notes") or ""
+    explicit_ref = extract_context_id(notes)
+
+    if explicit_ref:
+        try:
+            ctx = resolve_context(explicit_ref, fuzzy=False)
+        except SystemExit:
+            return {
+                "status": "invalid-explicit",
+                "explicit_ref": explicit_ref,
+            }
+
+        return {
+            "status": "resolved",
+            "context": ctx,
+            "context_id": context_id_fn(ctx),
+            "source": "explicit",
+            "evidence": ["explicit ctx: override"],
+        }
+
+    rule_matches: list[tuple[dict[str, Any], list[str]]] = []
+
+    for ctx in iter_contexts():
+        rule = calendar_match_rule(ctx)
+        if rule is None:
+            continue
+
+        matched, evidence = match_calendar_rule(event, rule)
+        if matched:
+            rule_matches.append((ctx, evidence))
+
+    if len(rule_matches) == 1:
+        ctx, evidence = rule_matches[0]
+        return {
+            "status": "resolved",
+            "context": ctx,
+            "context_id": context_id_fn(ctx),
+            "source": "rule",
+            "evidence": evidence,
+        }
+
+    if len(rule_matches) > 1:
+        return {
+            "status": "ambiguous",
+            "source": "rule",
+            "matches": [
+                {
+                    "context": ctx,
+                    "context_id": context_id_fn(ctx),
+                    "evidence": evidence,
+                }
+                for ctx, evidence in rule_matches
+            ],
+        }
+
+    # Backward compatibility: calendar.aliases is a title-only fallback.
+    title = str(event.get("title") or "")
+    folded_title = title.casefold()
+    alias_matches: list[tuple[dict[str, Any], list[str]]] = []
+
+    for ctx in iter_contexts():
+        matched_aliases = [
+            alias
+            for alias in calendar_aliases(ctx)
+            if alias.casefold() in folded_title
+        ]
+
+        if matched_aliases:
+            alias_matches.append((ctx, matched_aliases))
+
+    if len(alias_matches) == 1:
+        ctx, matched_aliases = alias_matches[0]
+        alias = max(matched_aliases, key=len)
+        return {
+            "status": "resolved",
+            "context": ctx,
+            "context_id": context_id_fn(ctx),
+            "source": "alias",
+            "alias": alias,
+            "evidence": [f"title contains '{alias}'"],
+        }
+
+    if len(alias_matches) > 1:
+        return {
+            "status": "ambiguous",
+            "source": "alias",
+            "matches": [
+                {
+                    "context": ctx,
+                    "context_id": context_id_fn(ctx),
+                    "aliases": matched_aliases,
+                    "evidence": [
+                        f"title contains '{alias}'"
+                        for alias in matched_aliases
+                    ],
+                }
+                for ctx, matched_aliases in alias_matches
+            ],
+        }
+
+    return {"status": "unresolved"}
+
+
 def show_now() -> None:
-    events = get_current_calendar_events()
+    """Open the context associated with the event genuinely active now."""
+    now = datetime.now(timezone.utc)
+    current_events = [
+        event
+        for event in get_calendar_events(1)
+        if calendar_event_status(event, now) == "now"
+    ]
 
-    tagged_events = []
-
-    for event in events:
-        notes = event.get("notes") or ""
-        context_id = extract_context_id(notes)
-
-        if context_id:
-            tagged_events.append((event, context_id))
-
-    if not tagged_events:
-        print("No current calendar event has a context tag.")
+    if not current_events:
+        print("No calendar event is current now.")
         return
 
-    if len(tagged_events) > 1:
-        print("Multiple current calendar events have context tags:")
-        for event, context_id in tagged_events:
-            print(f"  {event.get('title', '(untitled)')}: {context_id}")
+    resolved = []
+    problems = []
+
+    for event in current_events:
+        result = resolve_calendar_event(event)
+
+        if result["status"] == "resolved":
+            resolved.append((event, result))
+        else:
+            problems.append((event, result))
+
+    if len(resolved) > 1:
+        print("Multiple current calendar events resolve to contexts:")
+        for event, result in resolved:
+            context_id = result["context_id"]
+            print(
+                f"  {format_event_time(event['start'])} "
+                f"{event.get('title', '(untitled)')}: {context_id}"
+            )
         return
 
-    event, context_id = tagged_events[0]
+    if len(resolved) == 1:
+        event, result = resolved[0]
+        context_id = result["context_id"]
+        source = result["source"]
 
-    print(
-        f"Opening context '{context_id}' "
-        f"for calendar event '{event.get('title', '(untitled)')}'"
-    )
+        if source == "rule":
+            detail = "calendar match rule"
+        elif source == "alias":
+            detail = f"calendar alias '{result['alias']}'"
+        else:
+            detail = "explicit ctx: override"
 
-    activate_context(context_id)
+        print(
+            f"Opening context '{context_id}' "
+            f"for calendar event '{event.get('title', '(untitled)')}' "
+            f"via {detail}"
+        )
+        activate_context(context_id)
+        return
+
+    # No current event resolved. Give a useful diagnostic for the active event(s).
+    print("Current calendar event has no resolvable context:")
+    for event, result in problems:
+        title = event.get("title", "(untitled)")
+        status = result["status"]
+
+        if status == "ambiguous":
+            names = [
+                match["context"].get("name", match["context_id"])
+                for match in result["matches"]
+            ]
+            print(f"  {title}: ambiguous ({', '.join(names)})")
+        elif status == "invalid-explicit":
+            print(
+                f"  {title}: ctx: {result['explicit_ref']} "
+                "does not name a known context"
+            )
+        else:
+            print(
+                f"  {title}: no ctx: override or calendar matching rule matched"
+            )
 
 
 # ----------------------------------------------------------------------
@@ -635,6 +1193,20 @@ def reconcile_space_state() -> dict[str, str]:
             changed = True
             continue
 
+        # Transparently migrate live state from legacy filename-based identity
+        # to the immutable id. This matters immediately after `ctx ensure-ids`.
+        try:
+            ctx = resolve_context(context_id, fuzzy=False)
+            canonical_id = context_id_fn(ctx)
+            if canonical_id != context_id:
+                state[space] = canonical_id
+                context_id = canonical_id
+                changed = True
+        except SystemExit:
+            # Preserve unknown assignments while they still have windows; they
+            # may refer to a descriptor temporarily unavailable to ctx.
+            pass
+
         if not windows_on_space(space):
             print(
                 f"Removing stale assignment: {space} -> {context_id}",
@@ -783,67 +1355,76 @@ def alfred_open_contexts() -> dict[str, str]:
 
 def alfred_calendar_items(
     open_contexts: dict[str, str] | None = None,
+    days: int = ALFRED_CALENDAR_DAYS,
 ) -> list[dict[str, Any]]:
+    """Return context-related Calendar events over a short look-ahead horizon.
+
+    Today is shown first with NOW/NEXT/LATER/EARLIER semantics. Subsequent
+    days are appended chronologically and preceded by disabled Alfred items
+    that act as visual day separators.
+    """
     now = datetime.now(timezone.utc)
+    local_now = now.astimezone()
+    today = local_now.date()
     open_contexts = open_contexts or {}
 
     candidates = []
 
-    for event in get_current_calendar_events():
-        notes = event.get("notes") or ""
-        context_id = extract_context_id(notes)
+    for event in get_calendar_events(days):
+        resolution = resolve_calendar_event(event)
 
-        if not context_id:
+        if resolution["status"] == "unresolved":
             continue
 
-        context_file = CONTEXT_DIR / f"{context_id}.md"
-
-        if not context_file.exists():
-            continue
-
-        try:
-            ctx = read_context(context_id)
-        except SystemExit:
-            continue
-
-        status = calendar_event_status(event, now)
+        start_local = parse_event_time(event["start"]).astimezone()
+        event_date = start_local.date()
 
         candidates.append(
             {
                 "event": event,
-                "context_id": context_id,
-                "context": ctx,
-                "status": status,
-                "distance": calendar_event_distance(event, now),
+                "resolution": resolution,
+                "status": calendar_event_status(event, now),
+                "event_date": event_date,
+                "start_local": start_local,
             }
         )
 
-    # Current event first; everything else by proximity to now.
-    candidates.sort(
-        key=lambda item: (
-            0 if item["status"] == "now" else 1,
-            item["distance"],
-        )
-    )
+    # Today's events: NOW, future chronological, past reverse chronological.
+    today_items = [item for item in candidates if item["event_date"] == today]
+    future_day_items = [item for item in candidates if item["event_date"] > today]
 
-    # Identify the nearest future event so we can call it NEXT.
-    future_items = [item for item in candidates if item["status"] == "future"]
+    def today_sort_key(item: dict[str, Any]) -> tuple[int, float]:
+        status = item["status"]
+        start = item["start_local"].timestamp()
 
-    next_item = future_items[0] if future_items else None
+        if status == "now":
+            return (0, start)
+        if status == "future":
+            return (1, start)
+        return (2, -start)
 
-    items = []
+    today_items.sort(key=today_sort_key)
+    future_day_items.sort(key=lambda item: item["start_local"])
 
-    for item in candidates:
+    today_future = [item for item in today_items if item["status"] == "future"]
+    next_item = today_future[0] if today_future else None
+
+    def event_alfred_item(
+        item: dict[str, Any],
+        *,
+        future_day: bool = False,
+    ) -> dict[str, Any]:
         event = item["event"]
-        context_id = item["context_id"]
-        ctx = item["context"]
+        resolution = item["resolution"]
         status = item["status"]
 
         event_title = event.get("title") or "(untitled event)"
-        context_name = ctx.get("name", context_id)
         event_time = format_event_time(event["start"])
 
-        if status == "now":
+        if future_day:
+            day_name = item["start_local"].strftime("%a").upper()
+            title = f"{day_name} {event_time} {event_title}"
+        elif status == "now":
             title = f"NOW — {event_time} {event_title}"
         elif item is next_item:
             title = f"NEXT — {event_time} {event_title}"
@@ -852,33 +1433,120 @@ def alfred_calendar_items(
         else:
             title = f"LATER — {event_time} {event_title}"
 
-        open_space = open_contexts.get(context_id)
-        subtitle = context_name
-        if open_space:
-            subtitle = f"OPEN — {open_space} · {context_name}"
+        if resolution["status"] == "resolved":
+            ctx = resolution["context"]
+            context_id = resolution["context_id"]
+            context_name = ctx.get("name", context_id)
 
-        items.append(
-            {
+            open_space = open_contexts.get(context_id)
+            subtitle = context_name
+
+            if resolution["source"] == "rule":
+                evidence = ", ".join(resolution.get("evidence", []))
+                subtitle = f"{context_name} · {evidence}"
+            elif resolution["source"] == "alias":
+                subtitle = f"{context_name} · matched '{resolution['alias']}'"
+
+            if open_space:
+                subtitle = f"OPEN — {open_space} · {subtitle}"
+
+            day_words = [
+                item["start_local"].strftime("%A"),
+                item["start_local"].strftime("%d %B"),
+            ]
+
+            match_terms = [
+                event_title,
+                context_name,
+                context_id,
+                event_time,
+                status,
+                *day_words,
+                *calendar_aliases(ctx),
+                *event_attendee_emails(event),
+                *resolution.get("evidence", []),
+            ]
+
+            return {
                 "uid": (
-                    f"calendar:{event.get('start', '')}:{context_id}:{event_title}"
+                    f"calendar:{event.get('start', '')}:"
+                    f"{context_id}:{event_title}"
                 ),
                 "title": title,
                 "subtitle": subtitle,
                 "arg": context_id,
                 "valid": True,
-                "match": " ".join(
-                    [
-                        event_title,
-                        context_name,
-                        context_id,
-                        event_time,
-                        status,
-                    ]
-                ).lower(),
+                "match": " ".join(match_terms).lower(),
             }
-        )
+
+        if resolution["status"] == "ambiguous":
+            names = [
+                match["context"].get("name", match["context_id"])
+                for match in resolution["matches"]
+            ]
+            subtitle = "AMBIGUOUS — " + ", ".join(names)
+            match_terms = [event_title, event_time, status, *names]
+        else:
+            explicit_ref = resolution["explicit_ref"]
+            subtitle = f"INVALID ctx: {explicit_ref}"
+            match_terms = [event_title, event_time, status, explicit_ref]
+
+        return {
+            "uid": f"calendar-problem:{event.get('start', '')}:{event_title}",
+            "title": title,
+            "subtitle": subtitle,
+            "valid": False,
+            "match": " ".join(match_terms).lower(),
+        }
+
+    items: list[dict[str, Any]] = [
+        event_alfred_item(item)
+        for item in today_items
+    ]
+
+    # Append future-day events directly, in chronological order.
+    # Prefixing each title with the weekday keeps the view compact while
+    # still making the day boundary obvious.
+    items.extend(
+        event_alfred_item(item, future_day=True)
+        for item in future_day_items
+    )
 
     return items
+
+
+def alfred_now_contexts(query: str = "") -> None:
+    """Emit Alfred JSON for today plus the configured short look-ahead horizon."""
+    query = query.strip().lower()
+    open_contexts = alfred_open_contexts()
+
+    try:
+        items = alfred_calendar_items(open_contexts)
+    except Exception as exc:
+        print(
+            json.dumps(
+                {
+                    "skipknowledge": True,
+                    "items": [
+                        {
+                            "title": "Unable to read calendar contexts",
+                            "subtitle": str(exc),
+                            "valid": False,
+                        }
+                    ],
+                }
+            )
+        )
+        return
+
+    if query:
+        items = [
+            item
+            for item in items
+            if query in item.get("match", "")
+        ]
+
+    print(json.dumps({"skipknowledge": True, "items": items}))
 
 
 def alfred_contexts(query: str = "") -> None:
@@ -887,15 +1555,7 @@ def alfred_contexts(query: str = "") -> None:
 
     items = []
 
-    try:
-        items.extend(alfred_calendar_items(open_contexts))
-    except Exception as exc:
-        print(
-            f"Warning: unable to read calendar contexts: {exc}",
-            file=sys.stderr,
-        )
-
-    # Normal context registry follows.
+    # Normal context registry only; Calendar belongs to ctx alfred-now / cn.
     for ctx in iter_contexts():
         context_id = ctx["_id"]
         name = ctx.get("name", context_id)
@@ -904,8 +1564,10 @@ def alfred_contexts(query: str = "") -> None:
         searchable = " ".join(
             [
                 context_id,
+                ctx.get("_file_key", ""),
                 name,
                 description,
+                *ctx.get("_aliases", []),
             ]
         ).lower()
 
@@ -975,7 +1637,10 @@ def alfred_close_contexts(query: str = "") -> None:
 
         name = ctx.get("name", context_id)
         description = ctx.get("description", "")
-        searchable = " ".join([context_id, name, description, space]).lower()
+        searchable = " ".join(
+            [context_id, ctx.get("_file_key", ""), name, description,
+             *ctx.get("_aliases", []), space]
+        ).lower()
 
         if query and query not in searchable:
             continue
@@ -1009,12 +1674,11 @@ def alfred_close_contexts(query: str = "") -> None:
     print(json.dumps({"skipknowledge": True, "items": items}))
 
 
-def activate_context(context_id: str) -> None:
-    # Validate the context before allocating a Space.
-    context_file = CONTEXT_DIR / f"{context_id}.md"
-
-    if not context_file.exists():
-        raise SystemExit(f"Unknown context: {context_id}")
+def activate_context(context_ref: str) -> None:
+    # User-facing commands may supply a name, alias, legacy filename, or id.
+    ctx = resolve_context(context_ref)
+    context_id = context_id_fn(ctx)
+    context_name = ctx.get("name", ctx.get("_file_key", context_id))
 
     # First repair semantic Space labels following any display change.
     reconcile_space_topology()
@@ -1029,7 +1693,7 @@ def activate_context(context_id: str) -> None:
 
         if windows_on_space(space):
             focus_space(space)
-            print(f"Switched to {context_id} on {space}")
+            print(f"Switched to {context_name} on {space}")
             return
 
         state.pop(space, None)
@@ -1079,10 +1743,10 @@ def activate_context(context_id: str) -> None:
         save_space_state(state)
         raise
 
-    print(f"Opened {context_id} on {free_space}")
+    print(f"Opened {context_name} on {free_space}")
 
 
-def close_context(context_id: str | None = None) -> None:
+def close_context(context_ref: str | None = None) -> None:
     """Close a managed context.
 
     With no context_id, close the context on the current Space and return to
@@ -1096,7 +1760,7 @@ def close_context(context_id: str | None = None) -> None:
     original_label = original_space.get("label", "")
     state = load_space_state()
 
-    if context_id is None:
+    if context_ref is None:
         space_label = original_label
         if space_label not in CTX_SPACES:
             raise SystemExit(
@@ -1108,19 +1772,24 @@ def close_context(context_id: str | None = None) -> None:
         if not context_id:
             raise SystemExit(f"{space_label} is not currently assigned to a context.")
 
+        try:
+            ctx = resolve_context(context_id, fuzzy=False)
+            context_name = ctx.get("name", context_id)
+        except SystemExit:
+            context_name = context_id
+
         return_label = "main"
     else:
-        # Validate the named context so typos fail clearly.
-        context_file = CONTEXT_DIR / f"{context_id}.md"
-        if not context_file.exists():
-            raise SystemExit(f"Unknown context: {context_id}")
+        ctx = resolve_context(context_ref)
+        context_id = context_id_fn(ctx)
+        context_name = ctx.get("name", ctx.get("_file_key", context_id))
 
         space_label = next(
             (space for space, active_context in state.items() if active_context == context_id),
             None,
         )
         if not space_label:
-            raise SystemExit(f"Context '{context_id}' is not currently open.")
+            raise SystemExit(f"Context '{context_name}' is not currently open.")
 
         return_label = original_label or "main"
 
@@ -1135,7 +1804,7 @@ def close_context(context_id: str | None = None) -> None:
     state.pop(space_label, None)
     save_space_state(state)
 
-    print(f"Released {context_id} from {space_label}")
+    print(f"Released {context_name} from {space_label}")
 
     terminal_apps = {"kitty", "Terminal", "iTerm2"}
     ordinary_windows = [
@@ -1186,6 +1855,35 @@ def close_current_context() -> None:
     close_context()
 
 
+
+def complete_contexts() -> None:
+    """Emit shell-friendly context completions as NAME\tDESCRIPTION.
+
+    This is a deliberately small private API for shell completion front-ends
+    such as Carapace. Canonical human-facing names are emitted; aliases and
+    ids remain resolver inputs but are not shown as duplicate completion rows.
+    """
+    rows: list[tuple[str, str]] = []
+
+    for ctx in iter_contexts():
+        name = str(ctx.get("name") or ctx.get("_file_key") or "").strip()
+        if not name:
+            continue
+
+        description = str(ctx.get("description") or "").strip()
+
+        # Keep the protocol one record per line and two tab-separated fields.
+        name = name.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+        description = (
+            description.replace("\t", " ")
+            .replace("\r", " ")
+            .replace("\n", " ")
+        )
+        rows.append((name, description))
+
+    for name, description in sorted(rows, key=lambda row: row[0].casefold()):
+        print(f"{name}\t{description}")
+
 def usage() -> None:
     print(
         """Usage:
@@ -1193,32 +1891,55 @@ def usage() -> None:
   ctx list
       List all contexts.
 
+  ctx ensure-ids
+      Add an immutable random id to legacy context descriptors that do not
+      already have one. Existing names, filenames and content remain usable.
+
+  ctx <name-or-alias>
+      Open or switch to a context. Names, aliases, immutable ids and legacy
+      filenames are accepted; unambiguous partial/fuzzy names also resolve.
+
+  ctx edit <name-or-alias>
+      Open the matching context descriptor in VS Code.
+
+  ctx mark <name-or-alias>
+      Write a .ctx marker in the current directory containing the context's
+      immutable id.
+
+  ctx here
+      Walk upward from the current directory to the nearest .ctx marker and
+      open/switch to that context.
+
+  ctx unmark
+      Remove the .ctx marker from the current directory.
+
   ctx now
-      Show the current Calendar event and associated context.
+      Open the context associated with the event active now. Explicit ctx:
+      notes override automatic matching via calendar.match rules.
+
+  ctx close [name-or-alias]
+      With no name, close the context on the current managed Space and return
+      to main. With a name, close that context wherever it is open.
 
   ctx alfred [query]
       Emit Alfred Script Filter JSON for opening/switching contexts.
 
+  ctx alfred-now [query]
+      Emit Alfred Script Filter JSON for today and the next few days of
+      context-related Calendar events. Explicit ctx: notes override
+      automatic calendar.aliases matching.
+
   ctx alfred-close [query]
       Emit Alfred Script Filter JSON for currently open contexts.
 
-  ctx close [context-id]
-      With no context id, close the context on the current managed Space and
-      return to main. With a context id, close that context wherever it is
-      open and return to the previously active Space.
-
-  ctx <context-id>
-      Open or switch to a context.
-
 Examples:
 
-  ctx list
-  ctx now
-  ctx teaching-com413
-  ctx close
-  ctx close teaching-com413
-  ctx alfred com
-  ctx alfred-close com
+  ctx ensure-ids
+  ctx COM413
+  ctx edit COM413
+  ctx mark COM413
+  ctx here
+  ctx close COM413
 """
     )
 
@@ -1242,9 +1963,44 @@ def main() -> None:
         show_now()
         return
 
+    if command == "ensure-ids":
+        ensure_context_ids()
+        return
+
+    if command == "_complete":
+        if len(sys.argv) != 3 or sys.argv[2] != "contexts":
+            raise SystemExit("Usage: ctx _complete contexts")
+        complete_contexts()
+        return
+
+    if command == "edit":
+        if len(sys.argv) < 3:
+            raise SystemExit("Usage: ctx edit <name-or-alias>")
+        edit_context(" ".join(sys.argv[2:]))
+        return
+
+    if command == "mark":
+        if len(sys.argv) < 3:
+            raise SystemExit("Usage: ctx mark <name-or-alias>")
+        mark_context(" ".join(sys.argv[2:]))
+        return
+
+    if command == "unmark":
+        unmark_context()
+        return
+
+    if command == "here":
+        activate_here()
+        return
+
     if command == "alfred":
         query = " ".join(sys.argv[2:])
         alfred_contexts(query)
+        return
+
+    if command == "alfred-now":
+        query = " ".join(sys.argv[2:])
+        alfred_now_contexts(query)
         return
 
     if command == "alfred-close":
@@ -1253,11 +2009,11 @@ def main() -> None:
         return
 
     if command == "close":
-        context_id = sys.argv[2] if len(sys.argv) > 2 else None
-        close_context(context_id)
+        context_ref = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
+        close_context(context_ref)
         return
 
-    return activate_context(command)
+    return activate_context(" ".join(sys.argv[1:]))
 
 
 if __name__ == "__main__":

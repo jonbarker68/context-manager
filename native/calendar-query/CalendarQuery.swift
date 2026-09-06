@@ -8,6 +8,7 @@ struct CalendarEvent: Codable {
     let end: Date
     let notes: String?
     let isAllDay: Bool
+    let attendees: [String]
 }
 
 enum CalendarQueryError: Error, CustomStringConvertible {
@@ -38,10 +39,19 @@ struct CalendarQuery {
             let now = Date()
             let calendar = Calendar.current
 
+            let requestedDays: Int
+            if CommandLine.arguments.count > 1,
+               let parsed = Int(CommandLine.arguments[1]),
+               parsed > 0 {
+                requestedDays = parsed
+            } else {
+                requestedDays = 1
+            }
+
             let queryStart = calendar.startOfDay(for: now)
             let queryEnd = calendar.date(
                 byAdding: .day,
-                value: 1,
+                value: requestedDays,
                 to: queryStart
             )!
 
@@ -65,7 +75,20 @@ struct CalendarQuery {
                         start: $0.startDate,
                         end: $0.endDate,
                         notes: $0.notes,
-                        isAllDay: $0.isAllDay
+                        isAllDay: $0.isAllDay,
+                        attendees: ($0.attendees ?? []).compactMap { attendee -> String? in
+                            let url = attendee.url
+                            let absolute = url.absoluteString
+
+                            if url.scheme?.lowercased() == "mailto" {
+                                let address = String(
+                                    absolute.dropFirst("mailto:".count)
+                                )
+                                return address.removingPercentEncoding ?? address
+                            }
+
+                            return absolute
+                        }
                     )
                 }
 
