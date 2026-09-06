@@ -1,0 +1,19 @@
+calendar:
+  # Choose exactly one authoritative backend.
+  provider: google
+
+  google:
+    # "primary" is the signed-in user's primary Google Calendar.
+    # Add additional calendar IDs here if ctx should inspect them too.
+    calendar_ids:
+      - primary
+
+    # OAuth Desktop App credentials downloaded from Google Cloud.
+    credentials: ~/.config/ctx/google-calendar-credentials.json
+
+    # Created automatically by `ctx calendar auth`.
+    token: ~/.local/share/ctx/google-calendar-token.json
+
+  # Kept as an alternative backend for macOS Calendar users.
+  eventkit:
+    helper: native/calendar-query/calendar-query

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 
+import difflib
+import hashlib
 import json
 import os
 import re
-import shutil
 import secrets
-import difflib
+import shutil
 import subprocess
 import sys
 import time
@@ -15,11 +16,23 @@ from typing import Any
 
 import yaml
 
+try:
+    from .calendar_providers import (
+        DEFAULT_CONFIG_PATH,
+        calendar_events_for_days,
+        get_calendar_provider,
+    )
+except ImportError:
+    # Allows direct execution of cli.py during development.
+    from calendar_providers import (
+        DEFAULT_CONFIG_PATH,
+        calendar_events_for_days,
+        get_calendar_provider,
+    )
+
 CONTEXT_DIR = Path("~/Contexts").expanduser()
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-CALENDAR_QUERY = PROJECT_ROOT / "native" / "calendar-query" / "calendar-query"
-
 STATE_DIR = Path("~/.local/share/ctx").expanduser()
 STATE_FILE = STATE_DIR / "spaces.json"
 
@@ -190,8 +203,10 @@ def resolve_context(query: str, *, fuzzy: bool = True) -> dict[str, Any]:
     scored: list[tuple[float, dict[str, Any]]] = []
     for ctx in contexts:
         score = max(
-            (difflib.SequenceMatcher(None, q, term.casefold()).ratio()
-             for term in _context_terms(ctx)),
+            (
+                difflib.SequenceMatcher(None, q, term.casefold()).ratio()
+                for term in _context_terms(ctx)
+            ),
             default=0.0,
         )
         if score >= 0.6:
@@ -248,11 +263,7 @@ def generate_context_id(existing: set[str]) -> str:
 def ensure_context_ids() -> None:
     """Add an immutable random id to any legacy context descriptor."""
     contexts = list(iter_contexts())
-    existing = {
-        str(ctx["_stable_id"])
-        for ctx in contexts
-        if ctx.get("_stable_id")
-    }
+    existing = {str(ctx["_stable_id"]) for ctx in contexts if ctx.get("_stable_id")}
     changed = 0
 
     for ctx in contexts:
@@ -440,7 +451,11 @@ def find_code() -> str:
     )
 
 
-def open_context(context_id: str) -> None:
+def open_context(
+    context_id: str,
+    *,
+    calendar_event: dict[str, Any] | None = None,
+) -> None:
     ctx = read_context(context_id)
 
     print(f"Opening context: {ctx.get('name', context_id)}")
@@ -499,10 +514,15 @@ def open_context(context_id: str) -> None:
             urls.append(chatgpt_url)
             seen_urls.add(chatgpt_url)
 
+    # Only calendar-driven launches can supply an event, and the context must
+    # opt in explicitly before an attached meeting link is opened.
+    conference_url = conference_url_for_context(ctx, calendar_event)
+    if conference_url and conference_url not in seen_urls:
+        urls.append(conference_url)
+        seen_urls.add(conference_url)
+
     if urls:
-        chrome = Path(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        )
+        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
         if not chrome.exists():
             raise SystemExit(
@@ -528,34 +548,107 @@ def open_context(context_id: str) -> None:
         )
 
 
+def calendar_conference_enabled(ctx: dict[str, Any]) -> bool:
+    """Return whether this context opts in to event conference links."""
+    calendar = ctx.get("calendar") or {}
+    if not isinstance(calendar, dict):
+        return False
+
+    value = calendar.get("conference", False)
+    if isinstance(value, str):
+        return value.strip().casefold() in {"1", "true", "yes", "on"}
+    return bool(value)
+
+
+def calendar_event_key(event: dict[str, Any]) -> str:
+    """Opaque key used to carry an Alfred calendar selection back to ctx."""
+    provider = str(event.get("provider") or "")
+    event_id = str(event.get("id") or "")
+
+    if event_id:
+        identity = f"{provider}|id|{event_id}|{event.get('start', '')}"
+    else:
+        identity = "|".join(
+            [
+                provider,
+                str(event.get("calendar") or ""),
+                str(event.get("start") or ""),
+                str(event.get("end") or ""),
+                str(event.get("title") or ""),
+            ]
+        )
+
+    return hashlib.sha256(identity.encode("utf-8")).hexdigest()[:24]
+
+
+def calendar_launch_ref(context_id: str, event: dict[str, Any]) -> str:
+    return f"__calendar__:{context_id}:{calendar_event_key(event)}"
+
+
+def parse_calendar_launch_ref(value: str) -> tuple[str, str] | None:
+    prefix = "__calendar__:"
+    if not value.startswith(prefix):
+        return None
+
+    payload = value[len(prefix) :]
+    context_id, separator, event_key = payload.partition(":")
+    if not separator or not context_id or not event_key:
+        raise SystemExit("Invalid calendar launch reference.")
+    return context_id, event_key
+
+
+def conference_url_for_context(
+    ctx: dict[str, Any],
+    event: dict[str, Any] | None,
+) -> str | None:
+    if event is None or not calendar_conference_enabled(ctx):
+        return None
+
+    value = str(event.get("conference_url") or "").strip()
+    return value or None
+
+
 def get_calendar_events(days: int = 1) -> list[dict[str, Any]]:
-    """Return non-all-day Calendar events from today across ``days`` days."""
-    if not CALENDAR_QUERY.exists():
-        raise SystemExit(
-            f"Calendar helper not found:\n"
-            f"  {CALENDAR_QUERY}\n\n"
-            "Build it before using Calendar integration."
-        )
-
-    days = max(1, int(days))
-
-    result = subprocess.run(
-        [str(CALENDAR_QUERY), str(days)],
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        message = result.stderr.strip() or "Unknown error"
-
-        raise SystemExit(f"Unable to query Calendar:\n{message}")
-
+    """Return normalised events from the configured calendar provider."""
     try:
-        return json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
-        raise SystemExit(
-            f"Calendar helper returned invalid JSON:\n{result.stdout}\n\n{exc}"
-        )
+        provider = get_calendar_provider(project_root=PROJECT_ROOT)
+        return calendar_events_for_days(provider, days)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+
+def calendar_status() -> None:
+    """Show the configured provider without querying calendar data."""
+    try:
+        provider = get_calendar_provider(project_root=PROJECT_ROOT)
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(f"Calendar provider: {provider.describe()}")
+    print(f"Config: {DEFAULT_CONFIG_PATH}")
+
+
+def calendar_auth() -> None:
+    """Run provider authentication when required (Google OAuth)."""
+    try:
+        provider = get_calendar_provider(project_root=PROJECT_ROOT)
+        provider.authenticate()
+    except RuntimeError as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(f"Calendar authentication ready: {provider.describe()}")
+
+
+def calendar_command(args: list[str]) -> None:
+    if not args or args[0] == "status":
+        calendar_status()
+        return
+
+    if args[0] == "auth":
+        calendar_auth()
+        return
+
+    raise SystemExit("Usage: ctx calendar [status|auth]")
 
 
 def extract_context_id(text: str) -> str | None:
@@ -584,11 +677,7 @@ def calendar_aliases(ctx: dict[str, Any]) -> list[str]:
     if isinstance(aliases, str):
         aliases = [aliases]
 
-    return [
-        str(alias).strip()
-        for alias in aliases
-        if str(alias).strip()
-    ]
+    return [str(alias).strip() for alias in aliases if str(alias).strip()]
 
 
 def event_attendee_emails(event: dict[str, Any]) -> list[str]:
@@ -802,9 +891,7 @@ def resolve_calendar_event(
 
     for ctx in iter_contexts():
         matched_aliases = [
-            alias
-            for alias in calendar_aliases(ctx)
-            if alias.casefold() in folded_title
+            alias for alias in calendar_aliases(ctx) if alias.casefold() in folded_title
         ]
 
         if matched_aliases:
@@ -832,8 +919,7 @@ def resolve_calendar_event(
                     "context_id": context_id_fn(ctx),
                     "aliases": matched_aliases,
                     "evidence": [
-                        f"title contains '{alias}'"
-                        for alias in matched_aliases
+                        f"title contains '{alias}'" for alias in matched_aliases
                     ],
                 }
                 for ctx, matched_aliases in alias_matches
@@ -894,7 +980,7 @@ def show_now() -> None:
             f"for calendar event '{event.get('title', '(untitled)')}' "
             f"via {detail}"
         )
-        activate_context(context_id)
+        activate_context(context_id, calendar_event=event)
         return
 
     # No current event resolved. Give a useful diagnostic for the active event(s).
@@ -915,9 +1001,7 @@ def show_now() -> None:
                 "does not name a known context"
             )
         else:
-            print(
-                f"  {title}: no ctx: override or calendar matching rule matched"
-            )
+            print(f"  {title}: no ctx: override or calendar matching rule matched")
 
 
 # ----------------------------------------------------------------------
@@ -1234,9 +1318,7 @@ def _applescript_string(value: str) -> str:
 def app_window_count_on_space(space_label: str, app_name: str) -> int:
     """Return the number of yabai-visible windows for an app on one Space."""
     return sum(
-        1
-        for window in windows_on_space(space_label)
-        if window.get("app") == app_name
+        1 for window in windows_on_space(space_label) if window.get("app") == app_name
     )
 
 
@@ -1347,9 +1429,7 @@ def alfred_open_contexts() -> dict[str, str]:
     """
     state = load_space_state()
     return {
-        context_id: space
-        for space, context_id in state.items()
-        if space in CTX_SPACES
+        context_id: space for space, context_id in state.items() if space in CTX_SPACES
     }
 
 
@@ -1447,6 +1527,9 @@ def alfred_calendar_items(
             elif resolution["source"] == "alias":
                 subtitle = f"{context_name} · matched '{resolution['alias']}'"
 
+            if calendar_conference_enabled(ctx) and event.get("conference_url"):
+                subtitle = f"{subtitle} · JOIN"
+
             if open_space:
                 subtitle = f"OPEN — {open_space} · {subtitle}"
 
@@ -1469,12 +1552,11 @@ def alfred_calendar_items(
 
             return {
                 "uid": (
-                    f"calendar:{event.get('start', '')}:"
-                    f"{context_id}:{event_title}"
+                    f"calendar:{event.get('start', '')}:{context_id}:{event_title}"
                 ),
                 "title": title,
                 "subtitle": subtitle,
-                "arg": context_id,
+                "arg": calendar_launch_ref(context_id, event),
                 "valid": True,
                 "match": " ".join(match_terms).lower(),
             }
@@ -1499,18 +1581,12 @@ def alfred_calendar_items(
             "match": " ".join(match_terms).lower(),
         }
 
-    items: list[dict[str, Any]] = [
-        event_alfred_item(item)
-        for item in today_items
-    ]
+    items: list[dict[str, Any]] = [event_alfred_item(item) for item in today_items]
 
     # Append future-day events directly, in chronological order.
     # Prefixing each title with the weekday keeps the view compact while
     # still making the day boundary obvious.
-    items.extend(
-        event_alfred_item(item, future_day=True)
-        for item in future_day_items
-    )
+    items.extend(event_alfred_item(item, future_day=True) for item in future_day_items)
 
     return items
 
@@ -1540,11 +1616,7 @@ def alfred_now_contexts(query: str = "") -> None:
         return
 
     if query:
-        items = [
-            item
-            for item in items
-            if query in item.get("match", "")
-        ]
+        items = [item for item in items if query in item.get("match", "")]
 
     print(json.dumps({"skipknowledge": True, "items": items}))
 
@@ -1638,8 +1710,14 @@ def alfred_close_contexts(query: str = "") -> None:
         name = ctx.get("name", context_id)
         description = ctx.get("description", "")
         searchable = " ".join(
-            [context_id, ctx.get("_file_key", ""), name, description,
-             *ctx.get("_aliases", []), space]
+            [
+                context_id,
+                ctx.get("_file_key", ""),
+                name,
+                description,
+                *ctx.get("_aliases", []),
+                space,
+            ]
         ).lower()
 
         if query and query not in searchable:
@@ -1674,7 +1752,11 @@ def alfred_close_contexts(query: str = "") -> None:
     print(json.dumps({"skipknowledge": True, "items": items}))
 
 
-def activate_context(context_ref: str) -> None:
+def activate_context(
+    context_ref: str,
+    *,
+    calendar_event: dict[str, Any] | None = None,
+) -> None:
     # User-facing commands may supply a name, alias, legacy filename, or id.
     ctx = resolve_context(context_ref)
     context_id = context_id_fn(ctx)
@@ -1693,6 +1775,28 @@ def activate_context(context_ref: str) -> None:
 
         if windows_on_space(space):
             focus_space(space)
+
+            conference_url = conference_url_for_context(ctx, calendar_event)
+            if conference_url:
+                existing_window_ids = {
+                    window.get("id")
+                    for window in all_windows()
+                    if window.get("id") is not None
+                }
+                chrome = Path(
+                    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+                )
+                if not chrome.exists():
+                    raise SystemExit(
+                        "Google Chrome is required for conference URLs but "
+                        "was not found in /Applications."
+                    )
+                subprocess.Popen(
+                    [str(chrome), "--new-window", conference_url],
+                    start_new_session=True,
+                )
+                ensure_new_windows_on_space(space, existing_window_ids)
+
             print(f"Switched to {context_name} on {space}")
             return
 
@@ -1725,9 +1829,7 @@ def activate_context(context_ref: str) -> None:
     # free_space is focused. We will move only windows that appear after this
     # snapshot, leaving all pre-existing windows untouched.
     existing_window_ids = {
-        window.get("id")
-        for window in all_windows()
-        if window.get("id") is not None
+        window.get("id") for window in all_windows() if window.get("id") is not None
     }
 
     # Record allocation before launching, so a partially failed
@@ -1736,7 +1838,7 @@ def activate_context(context_ref: str) -> None:
     save_space_state(state)
 
     try:
-        open_context(context_id)
+        open_context(context_id, calendar_event=calendar_event)
         ensure_new_windows_on_space(free_space, existing_window_ids)
     except Exception:
         state.pop(free_space, None)
@@ -1744,6 +1846,45 @@ def activate_context(context_ref: str) -> None:
         raise
 
     print(f"Opened {context_name} on {free_space}")
+
+
+def activate_calendar_selection(value: str) -> None:
+    """Open the exact event selected in Alfred's calendar workflow."""
+    parsed = parse_calendar_launch_ref(value)
+    if parsed is None:
+        raise SystemExit("Invalid calendar selection.")
+
+    expected_context_id, expected_event_key = parsed
+    matching_event = next(
+        (
+            event
+            for event in get_calendar_events(ALFRED_CALENDAR_DAYS)
+            if calendar_event_key(event) == expected_event_key
+        ),
+        None,
+    )
+
+    if matching_event is None:
+        raise SystemExit(
+            "That calendar event could no longer be found. "
+            "Run cn again and reselect it."
+        )
+
+    resolution = resolve_calendar_event(matching_event)
+    if resolution.get("status") != "resolved":
+        raise SystemExit(
+            "That event no longer resolves uniquely to a context. "
+            "Run cn again to see the current resolution."
+        )
+
+    actual_context_id = resolution["context_id"]
+    if actual_context_id != expected_context_id:
+        raise SystemExit(
+            "That event now resolves to a different context. "
+            "Run cn again and reselect it."
+        )
+
+    activate_context(actual_context_id, calendar_event=matching_event)
 
 
 def close_context(context_ref: str | None = None) -> None:
@@ -1785,7 +1926,11 @@ def close_context(context_ref: str | None = None) -> None:
         context_name = ctx.get("name", ctx.get("_file_key", context_id))
 
         space_label = next(
-            (space for space, active_context in state.items() if active_context == context_id),
+            (
+                space
+                for space, active_context in state.items()
+                if active_context == context_id
+            ),
             None,
         )
         if not space_label:
@@ -1855,7 +2000,6 @@ def close_current_context() -> None:
     close_context()
 
 
-
 def complete_contexts() -> None:
     """Emit shell-friendly context completions as NAME\tDESCRIPTION.
 
@@ -1875,14 +2019,13 @@ def complete_contexts() -> None:
         # Keep the protocol one record per line and two tab-separated fields.
         name = name.replace("\t", " ").replace("\r", " ").replace("\n", " ")
         description = (
-            description.replace("\t", " ")
-            .replace("\r", " ")
-            .replace("\n", " ")
+            description.replace("\t", " ").replace("\r", " ").replace("\n", " ")
         )
         rows.append((name, description))
 
     for name, description in sorted(rows, key=lambda row: row[0].casefold()):
         print(f"{name}\t{description}")
+
 
 def usage() -> None:
     print(
@@ -1915,7 +2058,14 @@ def usage() -> None:
 
   ctx now
       Open the context associated with the event active now. Explicit ctx:
-      notes override automatic matching via calendar.match rules.
+      notes override automatic matching via calendar.match rules. If the
+      context has calendar.conference: true, open that event's meeting link.
+
+  ctx calendar status
+      Show the configured calendar provider.
+
+  ctx calendar auth
+      Authenticate the configured provider (needed for Google on first use).
 
   ctx close [name-or-alias]
       With no name, close the context on the current managed Space and return
@@ -1927,7 +2077,7 @@ def usage() -> None:
   ctx alfred-now [query]
       Emit Alfred Script Filter JSON for today and the next few days of
       context-related Calendar events. Explicit ctx: notes override
-      automatic calendar.aliases matching.
+      automatic calendar.match rules.
 
   ctx alfred-close [query]
       Emit Alfred Script Filter JSON for currently open contexts.
@@ -1951,6 +2101,10 @@ def main() -> None:
 
     command = sys.argv[1]
 
+    if parse_calendar_launch_ref(command) is not None:
+        activate_calendar_selection(command)
+        return
+
     if command in {"-h", "--help", "help"}:
         usage()
         return
@@ -1961,6 +2115,10 @@ def main() -> None:
 
     if command == "now":
         show_now()
+        return
+
+    if command == "calendar":
+        calendar_command(sys.argv[2:])
         return
 
     if command == "ensure-ids":
