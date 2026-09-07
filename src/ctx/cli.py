@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
-import difflib
-import hashlib
 import json
 import os
 import re
-import secrets
 import shutil
+import secrets
+import difflib
+import hashlib
 import subprocess
 import sys
 import time
@@ -203,10 +203,8 @@ def resolve_context(query: str, *, fuzzy: bool = True) -> dict[str, Any]:
     scored: list[tuple[float, dict[str, Any]]] = []
     for ctx in contexts:
         score = max(
-            (
-                difflib.SequenceMatcher(None, q, term.casefold()).ratio()
-                for term in _context_terms(ctx)
-            ),
+            (difflib.SequenceMatcher(None, q, term.casefold()).ratio()
+             for term in _context_terms(ctx)),
             default=0.0,
         )
         if score >= 0.6:
@@ -263,7 +261,11 @@ def generate_context_id(existing: set[str]) -> str:
 def ensure_context_ids() -> None:
     """Add an immutable random id to any legacy context descriptor."""
     contexts = list(iter_contexts())
-    existing = {str(ctx["_stable_id"]) for ctx in contexts if ctx.get("_stable_id")}
+    existing = {
+        str(ctx["_stable_id"])
+        for ctx in contexts
+        if ctx.get("_stable_id")
+    }
     changed = 0
 
     for ctx in contexts:
@@ -503,16 +505,54 @@ def open_context(
             urls.append(url)
             seen_urls.add(url)
 
-    # ChatGPT is deliberately a separate context resource rather than just
-    # another generic URL. For now its project URL is opened as another tab in
-    # the context's Chrome window. Later this can be redirected to the ChatGPT
-    # desktop app without requiring context-file changes.
+    # ChatGPT is deliberately a separate context resource rather than a
+    # generic browser URL. Create a fresh window in the current ChatGPT desktop
+    # app via File -> New Window, then hand the project URL to that app. This
+    # keeps the context window isolated from any ChatGPT windows already open
+    # in other Spaces.
     chatgpt = ctx.get("chatgpt")
     if chatgpt:
         chatgpt_url = normalise_chatgpt(chatgpt)
-        if chatgpt_url not in seen_urls:
-            urls.append(chatgpt_url)
-            seen_urls.add(chatgpt_url)
+
+        new_window_script = r"""
+        tell application "ChatGPT"
+            activate
+        end tell
+
+        delay 0.3
+
+        tell application "System Events"
+            tell process "ChatGPT"
+                click menu item "New Window" of menu "File" of menu bar 1
+            end tell
+        end tell
+
+        delay 0.5
+        """
+
+        result = subprocess.run(
+            ["osascript", "-e", new_window_script],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
+        if result.returncode != 0:
+            print(
+                "Warning: could not create a new ChatGPT window: "
+                + (result.stderr.strip() or "unknown AppleScript error"),
+                file=sys.stderr,
+            )
+
+        subprocess.Popen(
+            [
+                "open",
+                "-a",
+                "ChatGPT",
+                chatgpt_url,
+            ],
+            start_new_session=True,
+        )
 
     # Only calendar-driven launches can supply an event, and the context must
     # opt in explicitly before an attached meeting link is opened.
@@ -522,7 +562,9 @@ def open_context(
         seen_urls.add(conference_url)
 
     if urls:
-        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+        chrome = Path(
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+        )
 
         if not chrome.exists():
             raise SystemExit(
@@ -546,6 +588,7 @@ def open_context(
             ["open", path],
             start_new_session=True,
         )
+
 
 
 def calendar_conference_enabled(ctx: dict[str, Any]) -> bool:
@@ -590,7 +633,7 @@ def parse_calendar_launch_ref(value: str) -> tuple[str, str] | None:
     if not value.startswith(prefix):
         return None
 
-    payload = value[len(prefix) :]
+    payload = value[len(prefix):]
     context_id, separator, event_key = payload.partition(":")
     if not separator or not context_id or not event_key:
         raise SystemExit("Invalid calendar launch reference.")
@@ -677,7 +720,11 @@ def calendar_aliases(ctx: dict[str, Any]) -> list[str]:
     if isinstance(aliases, str):
         aliases = [aliases]
 
-    return [str(alias).strip() for alias in aliases if str(alias).strip()]
+    return [
+        str(alias).strip()
+        for alias in aliases
+        if str(alias).strip()
+    ]
 
 
 def event_attendee_emails(event: dict[str, Any]) -> list[str]:
@@ -891,7 +938,9 @@ def resolve_calendar_event(
 
     for ctx in iter_contexts():
         matched_aliases = [
-            alias for alias in calendar_aliases(ctx) if alias.casefold() in folded_title
+            alias
+            for alias in calendar_aliases(ctx)
+            if alias.casefold() in folded_title
         ]
 
         if matched_aliases:
@@ -919,7 +968,8 @@ def resolve_calendar_event(
                     "context_id": context_id_fn(ctx),
                     "aliases": matched_aliases,
                     "evidence": [
-                        f"title contains '{alias}'" for alias in matched_aliases
+                        f"title contains '{alias}'"
+                        for alias in matched_aliases
                     ],
                 }
                 for ctx, matched_aliases in alias_matches
@@ -1001,7 +1051,9 @@ def show_now() -> None:
                 "does not name a known context"
             )
         else:
-            print(f"  {title}: no ctx: override or calendar matching rule matched")
+            print(
+                f"  {title}: no ctx: override or calendar matching rule matched"
+            )
 
 
 # ----------------------------------------------------------------------
@@ -1318,7 +1370,9 @@ def _applescript_string(value: str) -> str:
 def app_window_count_on_space(space_label: str, app_name: str) -> int:
     """Return the number of yabai-visible windows for an app on one Space."""
     return sum(
-        1 for window in windows_on_space(space_label) if window.get("app") == app_name
+        1
+        for window in windows_on_space(space_label)
+        if window.get("app") == app_name
     )
 
 
@@ -1429,7 +1483,9 @@ def alfred_open_contexts() -> dict[str, str]:
     """
     state = load_space_state()
     return {
-        context_id: space for space, context_id in state.items() if space in CTX_SPACES
+        context_id: space
+        for space, context_id in state.items()
+        if space in CTX_SPACES
     }
 
 
@@ -1552,7 +1608,8 @@ def alfred_calendar_items(
 
             return {
                 "uid": (
-                    f"calendar:{event.get('start', '')}:{context_id}:{event_title}"
+                    f"calendar:{event.get('start', '')}:"
+                    f"{context_id}:{event_title}"
                 ),
                 "title": title,
                 "subtitle": subtitle,
@@ -1581,12 +1638,18 @@ def alfred_calendar_items(
             "match": " ".join(match_terms).lower(),
         }
 
-    items: list[dict[str, Any]] = [event_alfred_item(item) for item in today_items]
+    items: list[dict[str, Any]] = [
+        event_alfred_item(item)
+        for item in today_items
+    ]
 
     # Append future-day events directly, in chronological order.
     # Prefixing each title with the weekday keeps the view compact while
     # still making the day boundary obvious.
-    items.extend(event_alfred_item(item, future_day=True) for item in future_day_items)
+    items.extend(
+        event_alfred_item(item, future_day=True)
+        for item in future_day_items
+    )
 
     return items
 
@@ -1616,7 +1679,11 @@ def alfred_now_contexts(query: str = "") -> None:
         return
 
     if query:
-        items = [item for item in items if query in item.get("match", "")]
+        items = [
+            item
+            for item in items
+            if query in item.get("match", "")
+        ]
 
     print(json.dumps({"skipknowledge": True, "items": items}))
 
@@ -1710,14 +1777,8 @@ def alfred_close_contexts(query: str = "") -> None:
         name = ctx.get("name", context_id)
         description = ctx.get("description", "")
         searchable = " ".join(
-            [
-                context_id,
-                ctx.get("_file_key", ""),
-                name,
-                description,
-                *ctx.get("_aliases", []),
-                space,
-            ]
+            [context_id, ctx.get("_file_key", ""), name, description,
+             *ctx.get("_aliases", []), space]
         ).lower()
 
         if query and query not in searchable:
@@ -1829,7 +1890,9 @@ def activate_context(
     # free_space is focused. We will move only windows that appear after this
     # snapshot, leaving all pre-existing windows untouched.
     existing_window_ids = {
-        window.get("id") for window in all_windows() if window.get("id") is not None
+        window.get("id")
+        for window in all_windows()
+        if window.get("id") is not None
     }
 
     # Record allocation before launching, so a partially failed
@@ -1846,6 +1909,8 @@ def activate_context(
         raise
 
     print(f"Opened {context_name} on {free_space}")
+
+
 
 
 def activate_calendar_selection(value: str) -> None:
@@ -1926,11 +1991,7 @@ def close_context(context_ref: str | None = None) -> None:
         context_name = ctx.get("name", ctx.get("_file_key", context_id))
 
         space_label = next(
-            (
-                space
-                for space, active_context in state.items()
-                if active_context == context_id
-            ),
+            (space for space, active_context in state.items() if active_context == context_id),
             None,
         )
         if not space_label:
@@ -2000,6 +2061,7 @@ def close_current_context() -> None:
     close_context()
 
 
+
 def complete_contexts() -> None:
     """Emit shell-friendly context completions as NAME\tDESCRIPTION.
 
@@ -2019,13 +2081,14 @@ def complete_contexts() -> None:
         # Keep the protocol one record per line and two tab-separated fields.
         name = name.replace("\t", " ").replace("\r", " ").replace("\n", " ")
         description = (
-            description.replace("\t", " ").replace("\r", " ").replace("\n", " ")
+            description.replace("\t", " ")
+            .replace("\r", " ")
+            .replace("\n", " ")
         )
         rows.append((name, description))
 
     for name, description in sorted(rows, key=lambda row: row[0].casefold()):
         print(f"{name}\t{description}")
-
 
 def usage() -> None:
     print(
