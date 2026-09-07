@@ -1978,6 +1978,68 @@ def alfred_switch_contexts(query: str = "") -> None:
     print(json.dumps({"skipknowledge": True, "items": items}))
 
 
+def status_json() -> None:
+    """Emit machine-readable state for external ctx clients.
+
+    The reconciled Space assignment remains the source of truth.  Contexts are
+    returned in managed-Space order and the context on the currently focused
+    Space, if any, is identified separately.
+    """
+    reconcile_space_topology()
+    state = reconcile_space_state()
+
+    try:
+        current_space = get_current_space()
+        current_space_label = current_space.get("label", "")
+    except Exception:
+        current_space_label = ""
+
+    contexts_by_id = {context_id_fn(ctx): ctx for ctx in iter_contexts()}
+    open_contexts = []
+    current_context_id = None
+
+    for space in CTX_SPACES:
+        context_id = state.get(space)
+        if not context_id:
+            continue
+
+        ctx = contexts_by_id.get(context_id)
+        is_current = space == current_space_label
+        if is_current:
+            current_context_id = context_id
+
+        if ctx is None:
+            # Preserve a live assignment even if its descriptor is temporarily
+            # unavailable, so external clients still see the occupied Space.
+            open_contexts.append(
+                {
+                    "id": context_id,
+                    "name": None,
+                    "description": None,
+                    "space": space,
+                    "current": is_current,
+                }
+            )
+            continue
+
+        open_contexts.append(
+            {
+                "id": context_id,
+                "name": ctx.get("name", ctx.get("_file_key", context_id)),
+                "description": ctx.get("description", ""),
+                "space": space,
+                "current": is_current,
+            }
+        )
+
+    payload = {
+        "current_space": current_space_label or None,
+        "current_context": current_context_id,
+        "contexts": open_contexts,
+    }
+    print(json.dumps(payload))
+
+
 def switch_context(context_ref: str) -> None:
     """Switch to an already-open context without opening anything.
 
@@ -2204,6 +2266,9 @@ def usage() -> None:
   ctx alfred-close [query]
       Emit Alfred Script Filter JSON for currently open contexts.
 
+  ctx status --json
+      Emit machine-readable state for currently open contexts.
+
   ctx switch <context-id>
       Switch to an already-open context without opening anything.
 
@@ -2243,6 +2308,12 @@ def main() -> None:
 
     if command == "now":
         show_now()
+        return
+
+    if command == "status":
+        if sys.argv[2:] != ["--json"]:
+            raise SystemExit("Usage: ctx status --json")
+        status_json()
         return
 
     if command == "calendar":
