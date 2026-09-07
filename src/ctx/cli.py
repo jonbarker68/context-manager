@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
+import difflib
+import hashlib
 import json
 import os
 import re
-import shutil
 import secrets
-import difflib
-import hashlib
+import shutil
 import subprocess
 import sys
 import time
@@ -203,8 +203,10 @@ def resolve_context(query: str, *, fuzzy: bool = True) -> dict[str, Any]:
     scored: list[tuple[float, dict[str, Any]]] = []
     for ctx in contexts:
         score = max(
-            (difflib.SequenceMatcher(None, q, term.casefold()).ratio()
-             for term in _context_terms(ctx)),
+            (
+                difflib.SequenceMatcher(None, q, term.casefold()).ratio()
+                for term in _context_terms(ctx)
+            ),
             default=0.0,
         )
         if score >= 0.6:
@@ -261,11 +263,7 @@ def generate_context_id(existing: set[str]) -> str:
 def ensure_context_ids() -> None:
     """Add an immutable random id to any legacy context descriptor."""
     contexts = list(iter_contexts())
-    existing = {
-        str(ctx["_stable_id"])
-        for ctx in contexts
-        if ctx.get("_stable_id")
-    }
+    existing = {str(ctx["_stable_id"]) for ctx in contexts if ctx.get("_stable_id")}
     changed = 0
 
     for ctx in contexts:
@@ -562,9 +560,7 @@ def open_context(
         seen_urls.add(conference_url)
 
     if urls:
-        chrome = Path(
-            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-        )
+        chrome = Path("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
         if not chrome.exists():
             raise SystemExit(
@@ -588,7 +584,6 @@ def open_context(
             ["open", path],
             start_new_session=True,
         )
-
 
 
 def calendar_conference_enabled(ctx: dict[str, Any]) -> bool:
@@ -633,7 +628,7 @@ def parse_calendar_launch_ref(value: str) -> tuple[str, str] | None:
     if not value.startswith(prefix):
         return None
 
-    payload = value[len(prefix):]
+    payload = value[len(prefix) :]
     context_id, separator, event_key = payload.partition(":")
     if not separator or not context_id or not event_key:
         raise SystemExit("Invalid calendar launch reference.")
@@ -720,11 +715,7 @@ def calendar_aliases(ctx: dict[str, Any]) -> list[str]:
     if isinstance(aliases, str):
         aliases = [aliases]
 
-    return [
-        str(alias).strip()
-        for alias in aliases
-        if str(alias).strip()
-    ]
+    return [str(alias).strip() for alias in aliases if str(alias).strip()]
 
 
 def event_attendee_emails(event: dict[str, Any]) -> list[str]:
@@ -938,9 +929,7 @@ def resolve_calendar_event(
 
     for ctx in iter_contexts():
         matched_aliases = [
-            alias
-            for alias in calendar_aliases(ctx)
-            if alias.casefold() in folded_title
+            alias for alias in calendar_aliases(ctx) if alias.casefold() in folded_title
         ]
 
         if matched_aliases:
@@ -968,8 +957,7 @@ def resolve_calendar_event(
                     "context_id": context_id_fn(ctx),
                     "aliases": matched_aliases,
                     "evidence": [
-                        f"title contains '{alias}'"
-                        for alias in matched_aliases
+                        f"title contains '{alias}'" for alias in matched_aliases
                     ],
                 }
                 for ctx, matched_aliases in alias_matches
@@ -1051,9 +1039,7 @@ def show_now() -> None:
                 "does not name a known context"
             )
         else:
-            print(
-                f"  {title}: no ctx: override or calendar matching rule matched"
-            )
+            print(f"  {title}: no ctx: override or calendar matching rule matched")
 
 
 # ----------------------------------------------------------------------
@@ -1370,9 +1356,7 @@ def _applescript_string(value: str) -> str:
 def app_window_count_on_space(space_label: str, app_name: str) -> int:
     """Return the number of yabai-visible windows for an app on one Space."""
     return sum(
-        1
-        for window in windows_on_space(space_label)
-        if window.get("app") == app_name
+        1 for window in windows_on_space(space_label) if window.get("app") == app_name
     )
 
 
@@ -1483,9 +1467,7 @@ def alfred_open_contexts() -> dict[str, str]:
     """
     state = load_space_state()
     return {
-        context_id: space
-        for space, context_id in state.items()
-        if space in CTX_SPACES
+        context_id: space for space, context_id in state.items() if space in CTX_SPACES
     }
 
 
@@ -1608,8 +1590,7 @@ def alfred_calendar_items(
 
             return {
                 "uid": (
-                    f"calendar:{event.get('start', '')}:"
-                    f"{context_id}:{event_title}"
+                    f"calendar:{event.get('start', '')}:{context_id}:{event_title}"
                 ),
                 "title": title,
                 "subtitle": subtitle,
@@ -1638,18 +1619,12 @@ def alfred_calendar_items(
             "match": " ".join(match_terms).lower(),
         }
 
-    items: list[dict[str, Any]] = [
-        event_alfred_item(item)
-        for item in today_items
-    ]
+    items: list[dict[str, Any]] = [event_alfred_item(item) for item in today_items]
 
     # Append future-day events directly, in chronological order.
     # Prefixing each title with the weekday keeps the view compact while
     # still making the day boundary obvious.
-    items.extend(
-        event_alfred_item(item, future_day=True)
-        for item in future_day_items
-    )
+    items.extend(event_alfred_item(item, future_day=True) for item in future_day_items)
 
     return items
 
@@ -1679,11 +1654,7 @@ def alfred_now_contexts(query: str = "") -> None:
         return
 
     if query:
-        items = [
-            item
-            for item in items
-            if query in item.get("match", "")
-        ]
+        items = [item for item in items if query in item.get("match", "")]
 
     print(json.dumps({"skipknowledge": True, "items": items}))
 
@@ -1777,8 +1748,14 @@ def alfred_close_contexts(query: str = "") -> None:
         name = ctx.get("name", context_id)
         description = ctx.get("description", "")
         searchable = " ".join(
-            [context_id, ctx.get("_file_key", ""), name, description,
-             *ctx.get("_aliases", []), space]
+            [
+                context_id,
+                ctx.get("_file_key", ""),
+                name,
+                description,
+                *ctx.get("_aliases", []),
+                space,
+            ]
         ).lower()
 
         if query and query not in searchable:
@@ -1890,9 +1867,7 @@ def activate_context(
     # free_space is focused. We will move only windows that appear after this
     # snapshot, leaving all pre-existing windows untouched.
     existing_window_ids = {
-        window.get("id")
-        for window in all_windows()
-        if window.get("id") is not None
+        window.get("id") for window in all_windows() if window.get("id") is not None
     }
 
     # Record allocation before launching, so a partially failed
@@ -1909,8 +1884,6 @@ def activate_context(
         raise
 
     print(f"Opened {context_name} on {free_space}")
-
-
 
 
 def activate_calendar_selection(value: str) -> None:
@@ -1952,6 +1925,90 @@ def activate_calendar_selection(value: str) -> None:
     activate_context(actual_context_id, calendar_event=matching_event)
 
 
+def alfred_switch_contexts(query: str = "") -> None:
+    """Emit Alfred Script Filter JSON for currently open contexts only."""
+    query = query.strip().lower()
+    open_contexts = alfred_open_contexts()
+
+    try:
+        current_space = get_current_space()
+        current_space_label = current_space.get("label", "")
+    except Exception:
+        current_space_label = ""
+
+    items = []
+
+    for ctx in iter_contexts():
+        context_id = ctx["_id"]
+        space = open_contexts.get(context_id)
+
+        if not space:
+            continue
+
+        name = ctx.get("name", context_id)
+        description = ctx.get("description", "")
+
+        # Switching to the context already occupying the current Space is
+        # meaningless, so do not offer it as an Alfred switch target.
+        if space == current_space_label:
+            continue
+
+        searchable = " ".join([context_id, name, description, space]).lower()
+
+        if query and query not in searchable:
+            continue
+
+        subtitle = f"OPEN — {space}"
+
+        if description:
+            subtitle += f" · {description}"
+
+        items.append(
+            {
+                "uid": f"switch:{context_id}",
+                "title": name,
+                "subtitle": subtitle,
+                "arg": context_id,
+                "autocomplete": context_id,
+                "match": searchable,
+                "valid": True,
+            }
+        )
+
+    print(json.dumps({"skipknowledge": True, "items": items}))
+
+
+def switch_context(context_ref: str) -> None:
+    """Switch to an already-open context without opening anything.
+
+    Resolve the context exactly as ``ctx close <ref>`` does, so callers may
+    use an immutable id, filename, name, alias, substring, or unique fuzzy
+    match.  The Space state itself continues to store immutable context ids.
+    """
+    reconcile_space_topology()
+
+    ctx = resolve_context(context_ref)
+    context_id = context_id_fn(ctx)
+    context_name = ctx.get("name", ctx.get("_file_key", context_id))
+
+    state = reconcile_space_state()
+
+    space_label = next(
+        (
+            space
+            for space, active_context in state.items()
+            if active_context == context_id
+        ),
+        None,
+    )
+
+    if not space_label:
+        raise SystemExit(f"Context '{context_name}' is not currently open.")
+
+    focus_space(space_label)
+    print(f"Switched to {context_name} on {space_label}")
+
+
 def close_context(context_ref: str | None = None) -> None:
     """Close a managed context.
 
@@ -1991,7 +2048,11 @@ def close_context(context_ref: str | None = None) -> None:
         context_name = ctx.get("name", ctx.get("_file_key", context_id))
 
         space_label = next(
-            (space for space, active_context in state.items() if active_context == context_id),
+            (
+                space
+                for space, active_context in state.items()
+                if active_context == context_id
+            ),
             None,
         )
         if not space_label:
@@ -2061,7 +2122,6 @@ def close_current_context() -> None:
     close_context()
 
 
-
 def complete_contexts() -> None:
     """Emit shell-friendly context completions as NAME\tDESCRIPTION.
 
@@ -2081,14 +2141,13 @@ def complete_contexts() -> None:
         # Keep the protocol one record per line and two tab-separated fields.
         name = name.replace("\t", " ").replace("\r", " ").replace("\n", " ")
         description = (
-            description.replace("\t", " ")
-            .replace("\r", " ")
-            .replace("\n", " ")
+            description.replace("\t", " ").replace("\r", " ").replace("\n", " ")
         )
         rows.append((name, description))
 
     for name, description in sorted(rows, key=lambda row: row[0].casefold()):
         print(f"{name}\t{description}")
+
 
 def usage() -> None:
     print(
@@ -2144,6 +2203,12 @@ def usage() -> None:
 
   ctx alfred-close [query]
       Emit Alfred Script Filter JSON for currently open contexts.
+
+  ctx switch <context-id>
+      Switch to an already-open context without opening anything.
+
+  ctx alfred-switch [query]
+      Emit Alfred Script Filter JSON for currently open switch targets.
 
 Examples:
 
@@ -2224,6 +2289,11 @@ def main() -> None:
         alfred_now_contexts(query)
         return
 
+    if command == "alfred-switch":
+        query = " ".join(sys.argv[2:])
+        alfred_switch_contexts(query)
+        return
+
     if command == "alfred-close":
         query = " ".join(sys.argv[2:])
         alfred_close_contexts(query)
@@ -2232,6 +2302,12 @@ def main() -> None:
     if command == "close":
         context_ref = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
         close_context(context_ref)
+        return
+
+    if command == "switch":
+        if len(sys.argv) < 3:
+            raise SystemExit("Usage: ctx switch <name-or-alias>")
+        switch_context(" ".join(sys.argv[2:]))
         return
 
     return activate_context(" ".join(sys.argv[1:]))
