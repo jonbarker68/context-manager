@@ -260,6 +260,79 @@ def generate_context_id(existing: set[str]) -> str:
             return candidate
 
 
+def slugify_context_identity(value: str) -> str:
+    """Return a predictable lowercase, hyphen-separated context identity."""
+    slug = re.sub(r"[^a-z0-9]+", "-", value.casefold()).strip("-")
+    if not slug:
+        raise SystemExit(f"Unable to derive a context name from: {value!r}")
+    return slug
+
+
+def display_path(path: Path) -> str:
+    """Prefer ~/... for paths under the user's home directory."""
+    path = path.resolve()
+    home = Path.home().resolve()
+    try:
+        return f"~/{path.relative_to(home)}"
+    except ValueError:
+        return str(path)
+
+
+def new_code_context() -> None:
+    """Create a minimal code context for the current working directory."""
+    project_dir = Path.cwd().resolve()
+    identity = slugify_context_identity(project_dir.name)
+    name = f"code-{identity}"
+
+    CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
+    path = CONTEXT_DIR / f"{name}.md"
+
+    if path.exists():
+        raise SystemExit(f"Context already exists: {path}")
+
+    for ctx in iter_contexts():
+        if str(ctx.get("name", "")).casefold() == name.casefold():
+            raise SystemExit(
+                f"A context named '{name}' already exists at {ctx['_path']}"
+            )
+
+    try:
+        description = input(f"Description for {name}: ").strip()
+    except EOFError:
+        raise SystemExit("A description is required.")
+
+    if not description:
+        raise SystemExit("Description cannot be empty.")
+
+    existing_ids = {
+        str(ctx["_stable_id"])
+        for ctx in iter_contexts()
+        if ctx.get("_stable_id")
+    }
+    context_id = generate_context_id(existing_ids)
+    project_path = display_path(project_dir)
+
+    front_matter = {
+        "id": context_id,
+        "name": name,
+        "description": description,
+        "vscode": [project_path],
+        "terminal": [project_path],
+    }
+    yaml_text = yaml.safe_dump(
+        front_matter,
+        sort_keys=False,
+        default_flow_style=False,
+        allow_unicode=True,
+    )
+    path.write_text(f"---\n{yaml_text}---\n")
+
+    print(f"Created {path}")
+    print(f"  name:     {name}")
+    print(f"  vscode:   {project_path}")
+    print(f"  terminal: {project_path}")
+
+
 def ensure_context_ids() -> None:
     """Add an immutable random id to any legacy context descriptor."""
     contexts = list(iter_contexts())
@@ -2218,6 +2291,10 @@ def usage() -> None:
   ctx list
       List all contexts.
 
+  ctx new
+      Create a minimal code context for the current directory. The context is
+      named code-<directory-slug>; you are prompted only for its description.
+
   ctx ensure-ids
       Add an immutable random id to legacy context descriptors that do not
       already have one. Existing names, filenames and content remain usable.
@@ -2277,6 +2354,8 @@ def usage() -> None:
 
 Examples:
 
+  cd ~/projects/context-manager
+  ctx new
   ctx ensure-ids
   ctx COM413
   ctx edit COM413
@@ -2318,6 +2397,12 @@ def main() -> None:
 
     if command == "calendar":
         calendar_command(sys.argv[2:])
+        return
+
+    if command == "new":
+        if len(sys.argv) != 2:
+            raise SystemExit("Usage: ctx new")
+        new_code_context()
         return
 
     if command == "ensure-ids":
