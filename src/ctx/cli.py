@@ -42,6 +42,11 @@ DEFAULT_NOTES_CONFIG = {
     "vscode_profile": "Foam Notes",
 }
 
+DEFAULT_TODO_CONFIG = {
+    "file": "todo.md",
+    "section": "Inbox",
+}
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_DIR = Path("~/.local/share/ctx").expanduser()
 STATE_FILE = STATE_DIR / "spaces.json"
@@ -533,6 +538,138 @@ def notes_config() -> dict[str, str]:
         )
 
     return result
+
+
+def todo_config() -> dict[str, str]:
+    """Return resolved settings for the Markdown todo inbox."""
+    config = read_context_config()
+    configured = config.get("todo") or {}
+    if not isinstance(configured, dict):
+        raise SystemExit(
+            f"Invalid {CONTEXT_CONFIG_FILE}: 'todo' must be a YAML mapping."
+        )
+
+    result = {**DEFAULT_TODO_CONFIG}
+    for key in result:
+        value = configured.get(key)
+        if value is not None:
+            result[key] = str(value)
+
+    if not result["file"].strip():
+        raise SystemExit(
+            f"Invalid {CONTEXT_CONFIG_FILE}: todo.file cannot be empty."
+        )
+    if not result["section"].strip():
+        raise SystemExit(
+            f"Invalid {CONTEXT_CONFIG_FILE}: todo.section cannot be empty."
+        )
+    return result
+
+
+def todo_path() -> Path:
+    """Return the configured todo file, relative to notes.root unless absolute."""
+    configured = Path(os.path.expandvars(todo_config()["file"])).expanduser()
+    if configured.is_absolute():
+        return configured
+
+    notes_root = Path(os.path.expandvars(notes_config()["root"])).expanduser()
+    return notes_root / configured
+
+
+def _todo_timestamp(value: str | None) -> str:
+    """Return a normalised todo timestamp, defaulting to local capture time."""
+    if value is None:
+        return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise SystemExit(
+            "Invalid --date. Use an ISO date/time such as '2026-09-15 09:18'."
+        ) from exc
+
+    return parsed.strftime("%Y-%m-%d %H:%M")
+
+
+def add_todo(text: str, *, url: str | None = None, date: str | None = None) -> Path:
+    """Prepend one task to the configured Markdown todo inbox."""
+    path = todo_path()
+    if not path.is_file():
+        raise SystemExit(f"Todo file does not exist: {path}")
+
+    section = todo_config()["section"].strip()
+    content = path.read_text()
+    lines = content.splitlines(keepends=True)
+
+    heading_re = re.compile(rf"^##\s+{re.escape(section)}\s*$", re.IGNORECASE)
+    heading_index = next(
+        (i for i, line in enumerate(lines) if heading_re.match(line.rstrip("\r\n"))),
+        None,
+    )
+    if heading_index is None:
+        raise SystemExit(f"Todo section '## {section}' not found in {path}")
+
+    task_text = text.strip()
+    if not task_text:
+        raise SystemExit("Todo text cannot be empty.")
+    if "\n" in task_text or "\r" in task_text:
+        raise SystemExit("Todo text must be a single line.")
+
+    if url is not None:
+        url = url.strip()
+        if not url:
+            raise SystemExit("--url cannot be empty.")
+        task_text += f" ([email]({url}))"
+
+    task = f"- [ ] {task_text} — {_todo_timestamp(date)}\n"
+
+    # Keep the conventional blank line immediately below the heading, then
+    # insert before the existing inbox items so newest captures appear first.
+    insert_at = heading_index + 1
+    if insert_at < len(lines) and not lines[insert_at].strip():
+        insert_at += 1
+
+    lines.insert(insert_at, task)
+    path.write_text("".join(lines))
+    return path
+
+
+def todo_command(args: list[str]) -> None:
+    """Capture a task at the top of the configured todo inbox."""
+    text_parts: list[str] = []
+    url: str | None = None
+    date: str | None = None
+    i = 0
+
+    while i < len(args):
+        arg = args[i]
+        if arg in {"--url", "--date"}:
+            if i + 1 >= len(args):
+                raise SystemExit(
+                    'Usage: ctx todo <text> [--url <url>] [--date "YYYY-MM-DD HH:MM"]'
+                )
+            value = args[i + 1]
+            if arg == "--url":
+                url = value
+            else:
+                date = value
+            i += 2
+            continue
+        if arg.startswith("-"):
+            raise SystemExit(
+                'Usage: ctx todo <text> [--url <url>] [--date "YYYY-MM-DD HH:MM"]'
+            )
+        text_parts.append(arg)
+        i += 1
+
+    text = " ".join(text_parts).strip()
+    if not text:
+        raise SystemExit(
+            'Usage: ctx todo <text> [--url <url>] [--date "YYYY-MM-DD HH:MM"]'
+        )
+
+    path = add_todo(text, url=url, date=date)
+    print(f"Added todo to {path}")
 
 
 def normalise_notes(value: Any) -> list[str]:
@@ -2810,6 +2947,11 @@ def usage() -> None:
   ctx note --print [name-or-alias]
       Print resolved note paths without opening them.
 
+  ctx todo <text> [--url <url>] [--date "YYYY-MM-DD HH:MM"]
+      Add a Markdown task at the top of the configured todo inbox. The todo
+      file is relative to notes.root unless an absolute path is configured.
+      Without --date, the local capture time is used.
+
   ctx mark <name-or-alias>
       Write a .ctx marker in the current directory containing the context's
       immutable id.
@@ -2942,6 +3084,10 @@ def main() -> None:
 
     if command == "note":
         note_command(sys.argv[2:])
+        return
+
+    if command == "todo":
+        todo_command(sys.argv[2:])
         return
 
     if command == "mark":
