@@ -30,7 +30,17 @@ except ImportError:
         get_calendar_provider,
     )
 
-CONTEXT_DIR = Path("~/Contexts").expanduser()
+CONTEXT_CONFIG_FILE = Path("~/.config/ctx/config.yaml").expanduser()
+
+DEFAULT_CONTEXTS_CONFIG = {
+    "root": "~/shared/notes/obsidian/contexts",
+}
+
+DEFAULT_NOTES_CONFIG = {
+    "root": "~/shared/notes/obsidian",
+    "extension": ".md",
+    "vscode_profile": "Foam Notes",
+}
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_DIR = Path("~/.local/share/ctx").expanduser()
@@ -141,7 +151,7 @@ def _read_context_path(path: Path) -> dict[str, Any]:
 def iter_contexts():
     # rglob is deliberately used here: filenames and directory hierarchy are
     # storage details, not context identity.
-    for path in sorted(CONTEXT_DIR.rglob("*.md")):
+    for path in sorted(context_dir().rglob("*.md")):
         try:
             yield _read_context_path(path)
         except Exception as exc:
@@ -278,14 +288,14 @@ def display_path(path: Path) -> str:
         return str(path)
 
 
-def new_code_context() -> None:
+def new_code_context(description: str | None = None) -> None:
     """Create a minimal code context for the current working directory."""
     project_dir = Path.cwd().resolve()
     identity = slugify_context_identity(project_dir.name)
     name = f"code-{identity}"
 
-    CONTEXT_DIR.mkdir(parents=True, exist_ok=True)
-    path = CONTEXT_DIR / f"{name}.md"
+    context_dir().mkdir(parents=True, exist_ok=True)
+    path = context_dir() / f"{name}.md"
 
     if path.exists():
         raise SystemExit(f"Context already exists: {path}")
@@ -296,10 +306,13 @@ def new_code_context() -> None:
                 f"A context named '{name}' already exists at {ctx['_path']}"
             )
 
-    try:
-        description = input(f"Description for {name}: ").strip()
-    except EOFError:
-        raise SystemExit("A description is required.")
+    if description is None:
+        try:
+            description = input(f"Description for {name}: ").strip()
+        except EOFError:
+            raise SystemExit("A description is required.")
+    else:
+        description = description.strip()
 
     if not description:
         raise SystemExit("Description cannot be empty.")
@@ -448,6 +461,279 @@ def expand(path: str) -> str:
     return str(Path(os.path.expandvars(path)).expanduser())
 
 
+def read_context_config() -> dict[str, Any]:
+    """Read optional global ctx configuration from ~/.config/ctx/config.yaml."""
+    if not CONTEXT_CONFIG_FILE.exists():
+        return {}
+
+    try:
+        data = yaml.safe_load(CONTEXT_CONFIG_FILE.read_text()) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        raise SystemExit(f"Unable to read {CONTEXT_CONFIG_FILE}: {exc}") from exc
+
+    if not isinstance(data, dict):
+        raise SystemExit(f"Invalid {CONTEXT_CONFIG_FILE}: expected a YAML mapping.")
+    return data
+
+
+def contexts_config() -> dict[str, str]:
+    """Return resolved global settings for context descriptor storage."""
+    config = read_context_config()
+    configured = config.get("contexts") or {}
+    if not isinstance(configured, dict):
+        raise SystemExit(
+            f"Invalid {CONTEXT_CONFIG_FILE}: 'contexts' must be a YAML mapping."
+        )
+
+    result = {**DEFAULT_CONTEXTS_CONFIG}
+    for key in result:
+        value = configured.get(key)
+        if value is not None:
+            result[key] = str(value)
+
+    if not result["root"].strip():
+        raise SystemExit(
+            f"Invalid {CONTEXT_CONFIG_FILE}: contexts.root cannot be empty."
+        )
+    return result
+
+
+def context_dir() -> Path:
+    """Return the configured context descriptor root."""
+    return Path(os.path.expandvars(contexts_config()["root"])).expanduser()
+
+
+def notes_config() -> dict[str, str]:
+    """Return resolved global settings for context notes."""
+    config = read_context_config()
+    configured = config.get("notes") or {}
+    if not isinstance(configured, dict):
+        raise SystemExit(
+            f"Invalid {CONTEXT_CONFIG_FILE}: 'notes' must be a YAML mapping."
+        )
+
+    result = {**DEFAULT_NOTES_CONFIG}
+    for key in result:
+        value = configured.get(key)
+        if value is not None:
+            result[key] = str(value)
+
+    extension = result["extension"].strip()
+    if extension and not extension.startswith("."):
+        extension = f".{extension}"
+    result["extension"] = extension
+
+    if not result["root"].strip():
+        raise SystemExit(
+            f"Invalid {CONTEXT_CONFIG_FILE}: notes.root cannot be empty."
+        )
+    if not result["vscode_profile"].strip():
+        raise SystemExit(
+            f"Invalid {CONTEXT_CONFIG_FILE}: notes.vscode_profile cannot be empty."
+        )
+
+    return result
+
+
+def normalise_notes(value: Any) -> list[str]:
+    """Normalise a context's ``notes`` entry to a list of match expressions."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    raise SystemExit(
+        "Invalid notes entry: expected a match string or a list of match strings."
+    )
+
+
+def _note_pattern_matches(relative_path: str, expression: str, extension: str) -> bool:
+    """Return whether a root-relative note path matches a notes expression."""
+    import fnmatch
+
+    rel = relative_path.replace(os.sep, "/")
+    expr = os.path.expandvars(expression.strip()).replace(os.sep, "/")
+    anchored = expr.startswith("/")
+    expr = expr.lstrip("/")
+    if not expr:
+        return False
+
+    rel_lower = rel.casefold()
+    expr_lower = expr.casefold()
+    basename_lower = rel_lower.rsplit("/", 1)[-1]
+    ext_lower = extension.casefold()
+
+    expr_with_ext = (
+        expr_lower
+        if not extension or expr_lower.endswith(ext_lower)
+        else expr_lower + ext_lower
+    )
+    has_sep = "/" in expr_lower
+    has_wildcard = any(ch in expr_lower for ch in "*?[")
+
+    if not has_sep:
+        if has_wildcard:
+            return fnmatch.fnmatchcase(basename_lower, expr_with_ext)
+        stem = basename_lower
+        if extension and stem.endswith(ext_lower):
+            stem = stem[:-len(extension)]
+        return expr_lower in stem
+
+    if anchored:
+        return fnmatch.fnmatchcase(rel_lower, expr_with_ext)
+
+    rel_parts = rel_lower.split("/")
+    expr_parts = expr_with_ext.split("/")
+    if len(expr_parts) > len(rel_parts):
+        return False
+
+    width = len(expr_parts)
+    return any(
+        all(
+            fnmatch.fnmatchcase(rel_parts[start + offset], part)
+            for offset, part in enumerate(expr_parts)
+        )
+        for start in range(len(rel_parts) - width + 1)
+    )
+
+
+def resolve_note_paths(ctx: dict[str, Any], *, warn: bool = True) -> list[Path]:
+    """Resolve note match expressions below notes.root, excluding contexts.root."""
+    raw_notes = normalise_notes(ctx.get("notes"))
+    if not raw_notes:
+        return []
+
+    config = notes_config()
+    root = Path(os.path.expandvars(config["root"])).expanduser()
+    extension = config["extension"]
+    contexts_root = context_dir()
+
+    if not root.is_dir():
+        raise SystemExit(f"Notes root does not exist or is not a directory: {root}")
+
+    root_resolved = root.resolve()
+    contexts_resolved = contexts_root.resolve()
+    exclude_contexts = (
+        contexts_resolved == root_resolved
+        or root_resolved in contexts_resolved.parents
+    )
+
+    candidates: list[Path] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if extension and not path.name.casefold().endswith(extension.casefold()):
+            continue
+        if exclude_contexts:
+            path_resolved = path.resolve()
+            if (
+                path_resolved == contexts_resolved
+                or contexts_resolved in path_resolved.parents
+            ):
+                continue
+        candidates.append(path)
+
+    matched: set[Path] = set()
+    unmatched: list[str] = []
+    for expression in raw_notes:
+        expression_matches = [
+            path
+            for path in candidates
+            if _note_pattern_matches(
+                path.relative_to(root).as_posix(), expression, extension
+            )
+        ]
+        if expression_matches:
+            matched.update(expression_matches)
+        else:
+            unmatched.append(expression)
+
+    resolved = sorted(matched, key=lambda path: path.as_posix().casefold())
+
+    if unmatched and warn:
+        for expression in unmatched:
+            print(
+                f"Warning: no notes matched '{expression}' under {root}.",
+                file=sys.stderr,
+            )
+
+    if not resolved:
+        patterns = ", ".join(repr(item) for item in raw_notes)
+        raise SystemExit(f"No notes matched {patterns} under {root}.")
+
+    return resolved
+
+def open_context_notes(ctx: dict[str, Any]) -> list[Path]:
+    """Open all notes for a context in the configured VS Code profile."""
+    paths = resolve_note_paths(ctx)
+    if not paths:
+        return []
+
+    config = notes_config()
+    subprocess.Popen(
+        [
+            find_code(),
+            "--profile",
+            config["vscode_profile"],
+            "--new-window",
+            *(str(path) for path in paths),
+        ],
+        start_new_session=True,
+    )
+    return paths
+
+
+def current_context() -> dict[str, Any]:
+    """Return the context assigned to the currently focused managed Space."""
+    reconcile_space_topology()
+    state = reconcile_space_state()
+    current_label = get_current_space().get("label", "")
+    context_id = state.get(current_label)
+    if not context_id:
+        raise SystemExit("There is no open context on the current Space.")
+    return resolve_context(context_id, fuzzy=False)
+
+
+def note_command(args: list[str]) -> None:
+    """Open or print the notes attached to a context."""
+    print_only = False
+    remaining = list(args)
+    if "--print" in remaining:
+        print_only = True
+        remaining.remove("--print")
+    if any(arg.startswith("-") for arg in remaining):
+        raise SystemExit("Usage: ctx note [--print] [name-or-alias]")
+
+    ctx = resolve_context(" ".join(remaining)) if remaining else current_context()
+    paths = resolve_note_paths(ctx)
+    name = ctx.get("name", ctx.get("_file_key", ctx.get("_id", "context")))
+
+    if not paths:
+        raise SystemExit(f"Context '{name}' has no notes entry.")
+
+    if print_only:
+        for path in paths:
+            print(path)
+        return
+
+    config = notes_config()
+    subprocess.Popen(
+        [
+            find_code(),
+            "--profile",
+            config["vscode_profile"],
+            "--new-window",
+            *(str(path) for path in paths),
+        ],
+        start_new_session=True,
+    )
+    if len(paths) == 1:
+        print(f"Opened note for {name}: {paths[0]}")
+    else:
+        print(f"Opened {len(paths)} notes for {name}.")
+
+
 def normalise_url(item: Any) -> tuple[str, str]:
     if isinstance(item, str):
         return item, item
@@ -544,6 +830,8 @@ def open_context(
             ],
             start_new_session=True,
         )
+
+    open_context_notes(ctx)
 
     for path in ctx.get("terminal", []):
         subprocess.Popen(
@@ -1184,6 +1472,20 @@ def all_windows() -> list[dict[str, Any]]:
     return yabai("query", "--windows") or []
 
 
+def meaningful_windows_on_space(label: str) -> list[dict[str, Any]]:
+    """Return ordinary windows that should make a managed Space unavailable.
+
+    Sticky/all-Spaces utility windows are deliberately ignored. They do not
+    represent ownership of a context Space and should neither block allocation
+    nor be offered for cleanup.
+    """
+    return [
+        window
+        for window in windows_on_space(label)
+        if not window.get("is-sticky", False)
+    ]
+
+
 def ensure_new_windows_on_space(
     target_space: str,
     existing_window_ids: set[int],
@@ -1402,7 +1704,7 @@ def reconcile_space_state() -> dict[str, str]:
             # may refer to a descriptor temporarily unavailable to ctx.
             pass
 
-        if not windows_on_space(space):
+        if not meaningful_windows_on_space(space):
             print(
                 f"Removing stale assignment: {space} -> {context_id}",
                 file=sys.stderr,
@@ -1884,7 +2186,7 @@ def activate_context(
         if active_context != context_id:
             continue
 
-        if windows_on_space(space):
+        if meaningful_windows_on_space(space):
             focus_space(space)
 
             conference_url = conference_url_for_context(ctx, calendar_event)
@@ -1921,7 +2223,7 @@ def activate_context(
         (
             space
             for space in CTX_SPACES
-            if space not in state and not windows_on_space(space)
+            if space not in state and not meaningful_windows_on_space(space)
         ),
         None,
     )
@@ -2252,6 +2554,200 @@ def close_context(context_ref: str | None = None) -> None:
             )
 
 
+def spaces_command() -> None:
+    """Show the live state of managed context Spaces and their windows."""
+    reconcile_space_topology()
+    state = reconcile_space_state()
+
+    try:
+        current_label = get_current_space().get("label", "")
+    except Exception:
+        current_label = ""
+
+    spaces = yabai("query", "--spaces") or []
+    spaces_by_label = {
+        space.get("label"): space
+        for space in spaces
+        if space.get("label") in CTX_SPACES
+    }
+
+    contexts_by_id = {context_id_fn(ctx): ctx for ctx in iter_contexts()}
+
+    print(f"{'SPACE':<8} {'INDEX':<6} {'CONTEXT':<28} {'STATE':<8} WINDOWS")
+
+    for label in CTX_SPACES:
+        space = spaces_by_label.get(label)
+        if space is None:
+            print(f"{label:<8} {'-':<6} {'-':<28} {'MISSING':<8} -")
+            continue
+
+        context_id = state.get(label)
+        if context_id:
+            ctx = contexts_by_id.get(context_id)
+            context_name = (
+                ctx.get("name", ctx.get("_file_key", context_id))
+                if ctx is not None
+                else context_id
+            )
+        else:
+            context_name = "-"
+
+        raw_windows = windows_on_space(label)
+        meaningful = [
+            window for window in raw_windows if not window.get("is-sticky", False)
+        ]
+
+        if context_id:
+            status = "OPEN"
+        elif meaningful:
+            status = "ORPHAN"
+        elif raw_windows:
+            status = "STICKY"
+        else:
+            status = "FREE"
+
+        if label == current_label:
+            status += "*"
+
+        print(
+            f"{label:<8} {space.get('index', '-')!s:<6} "
+            f"{str(context_name):<28.28} {status:<8} {len(meaningful)}"
+        )
+
+        for window in raw_windows:
+            window_id = window.get("id", "?")
+            app = str(window.get("app") or "?")
+            title = str(window.get("title") or "")
+            flags = []
+            if window.get("is-sticky", False):
+                flags.append("sticky")
+            if window.get("is-visible", False):
+                flags.append("visible")
+            flag_text = f" [{', '.join(flags)}]" if flags else ""
+            print(f"         {window_id}  {app} — {title}{flag_text}")
+
+
+def clean_spaces() -> None:
+    """Interactively clean windows from unassigned managed context Spaces.
+
+    Only Spaces with no logical context assignment are eligible. Sticky
+    all-Spaces windows are ignored. The default action is to move orphaned
+    windows to ``main`` so recovery is non-destructive.
+    """
+    reconcile_space_topology()
+    state = reconcile_space_state()
+
+    try:
+        original_label = get_current_space().get("label", "")
+    except Exception:
+        original_label = ""
+
+    orphans: list[tuple[str, list[dict[str, Any]]]] = []
+    for label in CTX_SPACES:
+        if label in state:
+            continue
+        windows = meaningful_windows_on_space(label)
+        if windows:
+            orphans.append((label, windows))
+
+    if not orphans:
+        print("No orphan windows found on unassigned context Spaces.")
+        return
+
+    if not sys.stdin.isatty():
+        raise SystemExit("ctx clean requires an interactive terminal.")
+
+    for label, windows in orphans:
+        print(f"\n{label}: {len(windows)} orphan window(s)")
+        for window in windows:
+            print(
+                f"  {window.get('id', '?')}  "
+                f"{window.get('app', '?')} — {window.get('title', '')}"
+            )
+
+        while True:
+            choice = input(
+                "Move to main [m], close [c], ignore [i], quit [q] [m]: "
+            ).strip().lower()
+            if choice == "":
+                choice = "m"
+            if choice in {"m", "c", "i", "q"}:
+                break
+            print("Please enter m, c, i, or q.")
+
+        if choice == "q":
+            break
+        if choice == "i":
+            continue
+
+        failures: list[dict[str, Any]] = []
+
+        if choice == "m":
+            for window in windows:
+                window_id = window.get("id")
+                if window_id is None:
+                    failures.append(window)
+                    continue
+                try:
+                    yabai("window", str(window_id), "--space", "main")
+                except RuntimeError:
+                    failures.append(window)
+
+            moved = len(windows) - len(failures)
+            print(f"Moved {moved} window(s) from {label} to main.")
+
+        elif choice == "c":
+            # Accessibility fallback needs the target Space visible. Close
+            # ordinary windows first, then leave the Space before closing
+            # terminal windows so this command cannot kill its own shell.
+            if original_label != label:
+                focus_space(label)
+
+            terminal_apps = {"kitty", "Terminal", "iTerm2"}
+            ordinary = [
+                window for window in windows if window.get("app") not in terminal_apps
+            ]
+            terminals = [
+                window for window in windows if window.get("app") in terminal_apps
+            ]
+
+            for window in ordinary:
+                if not close_window(window, label):
+                    failures.append(window)
+
+            return_label = (
+                original_label
+                if original_label and original_label != label
+                else "main"
+            )
+            try:
+                focus_space(return_label)
+            except RuntimeError:
+                focus_space("main")
+
+            for window in terminals:
+                window_id = window.get("id")
+                if window_id is None:
+                    failures.append(window)
+                    continue
+                try:
+                    yabai("window", str(window_id), "--close")
+                except RuntimeError:
+                    failures.append(window)
+
+            closed = len(windows) - len(failures)
+            print(f"Closed {closed} window(s) from {label}.")
+
+        if failures:
+            print("Could not clean some windows:", file=sys.stderr)
+            for window in failures:
+                print(
+                    f"  {window.get('id', '?')}  "
+                    f"{window.get('app', '?')} — {window.get('title', '')}",
+                    file=sys.stderr,
+                )
+
+
 def close_current_context() -> None:
     """Backward-compatible wrapper for the original no-argument close."""
     close_context()
@@ -2306,6 +2802,14 @@ def usage() -> None:
   ctx edit <name-or-alias>
       Open the matching context descriptor in VS Code.
 
+  ctx note [name-or-alias]
+      Open the context's notes in the configured VS Code notes profile. With
+      no name, use the context on the current Space. Note expressions are
+      matched below notes.root from ~/.config/ctx/config.yaml.
+
+  ctx note --print [name-or-alias]
+      Print resolved note paths without opening them.
+
   ctx mark <name-or-alias>
       Write a .ctx marker in the current directory containing the context's
       immutable id.
@@ -2331,6 +2835,14 @@ def usage() -> None:
   ctx close [name-or-alias]
       With no name, close the context on the current managed Space and return
       to main. With a name, close that context wherever it is open.
+
+  ctx spaces
+      Show managed Spaces, their context assignment, occupancy state, and
+      yabai-visible windows. ORPHAN means windows exist with no assigned context.
+
+  ctx clean
+      Review orphan windows on unassigned managed Spaces. Each Space can be
+      moved to main (the default), closed, ignored, or left for later.
 
   ctx alfred [query]
       Emit Alfred Script Filter JSON for opening/switching contexts.
@@ -2359,6 +2871,8 @@ Examples:
   ctx ensure-ids
   ctx COM413
   ctx edit COM413
+  ctx note COM413
+  ctx note --print COM413
   ctx mark COM413
   ctx here
   ctx close COM413
@@ -2400,9 +2914,14 @@ def main() -> None:
         return
 
     if command == "new":
-        if len(sys.argv) != 2:
-            raise SystemExit("Usage: ctx new")
-        new_code_context()
+        args = sys.argv[2:]
+        description = None
+        if args:
+            if len(args) == 2 and args[0] == "--description":
+                description = args[1]
+            else:
+                raise SystemExit('Usage: ctx new [--description "<description>"]')
+        new_code_context(description)
         return
 
     if command == "ensure-ids":
@@ -2419,6 +2938,10 @@ def main() -> None:
         if len(sys.argv) < 3:
             raise SystemExit("Usage: ctx edit <name-or-alias>")
         edit_context(" ".join(sys.argv[2:]))
+        return
+
+    if command == "note":
+        note_command(sys.argv[2:])
         return
 
     if command == "mark":
@@ -2458,6 +2981,18 @@ def main() -> None:
     if command == "close":
         context_ref = " ".join(sys.argv[2:]) if len(sys.argv) > 2 else None
         close_context(context_ref)
+        return
+
+    if command == "spaces":
+        if len(sys.argv) != 2:
+            raise SystemExit("Usage: ctx spaces")
+        spaces_command()
+        return
+
+    if command == "clean":
+        if len(sys.argv) != 2:
+            raise SystemExit("Usage: ctx clean")
+        clean_spaces()
         return
 
     if command == "switch":
