@@ -1,0 +1,183 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>bundleid</key>
+	<string></string>
+	<key>connections</key>
+	<dict>
+		<key>8A9116AF-5D77-4815-B41C-7B9C18411E37</key>
+		<array>
+			<dict>
+				<key>destinationuid</key>
+				<string>B82427FB-36E2-4DD4-99D9-A668952AA21D</string>
+				<key>modifiers</key>
+				<integer>0</integer>
+				<key>modifiersubtext</key>
+				<string></string>
+				<key>vitoclose</key>
+				<false/>
+			</dict>
+		</array>
+		<key>F04F2D01-5898-4336-83AA-547A8D53E544</key>
+		<array>
+			<dict>
+				<key>destinationuid</key>
+				<string>8A9116AF-5D77-4815-B41C-7B9C18411E37</string>
+				<key>modifiers</key>
+				<integer>0</integer>
+				<key>modifiersubtext</key>
+				<string></string>
+				<key>vitoclose</key>
+				<false/>
+			</dict>
+		</array>
+	</dict>
+	<key>createdby</key>
+	<string></string>
+	<key>description</key>
+	<string>Adds an email to my notes todo.md file</string>
+	<key>disabled</key>
+	<false/>
+	<key>name</key>
+	<string>Add Gmail to TODO</string>
+	<key>objects</key>
+	<array>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>action</key>
+				<integer>0</integer>
+				<key>argument</key>
+				<integer>0</integer>
+				<key>focusedappvariable</key>
+				<false/>
+				<key>focusedappvariablename</key>
+				<string></string>
+				<key>hotkey</key>
+				<integer>17</integer>
+				<key>hotmod</key>
+				<integer>786432</integer>
+				<key>hotstring</key>
+				<string>T</string>
+				<key>leftcursor</key>
+				<false/>
+				<key>modsmode</key>
+				<integer>0</integer>
+				<key>relatedAppsMode</key>
+				<integer>0</integer>
+			</dict>
+			<key>type</key>
+			<string>alfred.workflow.trigger.hotkey</string>
+			<key>uid</key>
+			<string>F04F2D01-5898-4336-83AA-547A8D53E544</string>
+			<key>version</key>
+			<integer>2</integer>
+		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>concurrently</key>
+				<false/>
+				<key>escaping</key>
+				<integer>102</integer>
+				<key>script</key>
+				<string>#!/bin/zsh
+
+CTX="/Users/jon/bin/ctx"
+
+title=$(osascript -e 'tell application "Google Chrome" to get title of active tab of front window')
+url=$(osascript -e 'tell application "Google Chrome" to get URL of active tab of front window')
+
+# Must be Gmail
+if [[ "$url" != https://mail.google.com/mail/* ]]; then
+    echo "❌ Current Chrome tab is not Gmail"
+    exit 0
+fi
+
+# Must be an individual message
+fragment="${url#*#}"
+
+if [[ "$fragment" != */* ]]; then
+    echo "❌ No individual email is open"
+    exit 0
+fi
+
+# Strip Gmail account/site suffix
+subject=$(printf '%s\n' "$title" |
+    sed -E 's/ - [^ ]+@[^ ]+ - University of Sheffield Mail$//')
+
+# Add to TODO
+if "$CTX" todo "$subject" --url "$url" &gt;/dev/null 2&gt;&amp;1; then
+    echo "✓ Added to TODO: $subject"
+else
+    echo "❌ Failed to add: $subject"
+fi</string>
+				<key>scriptargtype</key>
+				<integer>1</integer>
+				<key>scriptfile</key>
+				<string></string>
+				<key>type</key>
+				<integer>11</integer>
+			</dict>
+			<key>type</key>
+			<string>alfred.workflow.action.script</string>
+			<key>uid</key>
+			<string>8A9116AF-5D77-4815-B41C-7B9C18411E37</string>
+			<key>version</key>
+			<integer>2</integer>
+		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>lastpathcomponent</key>
+				<false/>
+				<key>onlyshowifquerypopulated</key>
+				<false/>
+				<key>removeextension</key>
+				<false/>
+				<key>text</key>
+				<string>{query}</string>
+				<key>title</key>
+				<string>TODO</string>
+			</dict>
+			<key>type</key>
+			<string>alfred.workflow.output.notification</string>
+			<key>uid</key>
+			<string>B82427FB-36E2-4DD4-99D9-A668952AA21D</string>
+			<key>version</key>
+			<integer>1</integer>
+		</dict>
+	</array>
+	<key>readme</key>
+	<string></string>
+	<key>uidata</key>
+	<dict>
+		<key>8A9116AF-5D77-4815-B41C-7B9C18411E37</key>
+		<dict>
+			<key>xpos</key>
+			<real>525</real>
+			<key>ypos</key>
+			<real>235</real>
+		</dict>
+		<key>B82427FB-36E2-4DD4-99D9-A668952AA21D</key>
+		<dict>
+			<key>xpos</key>
+			<real>745</real>
+			<key>ypos</key>
+			<real>255</real>
+		</dict>
+		<key>F04F2D01-5898-4336-83AA-547A8D53E544</key>
+		<dict>
+			<key>xpos</key>
+			<real>270</real>
+			<key>ypos</key>
+			<real>210</real>
+		</dict>
+	</dict>
+	<key>userconfigurationconfig</key>
+	<array/>
+	<key>webaddress</key>
+	<string></string>
+</dict>
+</plist>
