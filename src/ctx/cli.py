@@ -2264,8 +2264,67 @@ def alfred_now_contexts(query: str = "") -> None:
     print(json.dumps({"skipknowledge": True, "items": items}))
 
 
+def fuzzy_score(query: str, text: str, *, basename_bonus: bool = False) -> int | None:
+    """Return a fuzzy-match score, or None when QUERY is not a subsequence.
+
+    Ranking favours exact/prefix/substring matches, then compact subsequences,
+    consecutive characters, word/path boundaries and earlier matches.  Notes
+    can additionally favour matches concentrated in the basename.
+    """
+    q = query.strip().casefold()
+    t = text.casefold()
+    if not q:
+        return 0
+
+    # Strong, predictable fast paths.
+    if q == t:
+        score = 100_000
+    elif t.startswith(q):
+        score = 90_000 - len(t)
+    else:
+        pos = t.find(q)
+        if pos >= 0:
+            score = 80_000 - (pos * 20) - len(t)
+        else:
+            positions: list[int] = []
+            start = 0
+            for ch in q:
+                pos = t.find(ch, start)
+                if pos < 0:
+                    return None
+                positions.append(pos)
+                start = pos + 1
+
+            span = positions[-1] - positions[0] + 1
+            gaps = span - len(q)
+            consecutive = sum(
+                1 for a, b in zip(positions, positions[1:]) if b == a + 1
+            )
+            boundaries = sum(
+                1
+                for pos in positions
+                if pos == 0 or t[pos - 1] in "/-_ ."
+            )
+            score = (
+                50_000
+                + consecutive * 250
+                + boundaries * 120
+                - gaps * 35
+                - positions[0] * 8
+                - len(t)
+            )
+
+    if basename_bonus:
+        basename = t.rsplit("/", 1)[-1]
+        basename_score = fuzzy_score(q, basename, basename_bonus=False)
+        if basename_score is not None:
+            score += 5_000
+
+    return score
+
+
 def alfred_notes(query: str = "") -> None:
-    """Emit Alfred Script Filter JSON for notes."""
+    """Emit fuzzy-ranked Alfred Script Filter JSON for notes."""
     config = notes_config()
     root = Path(os.path.expandvars(config["root"])).expanduser()
     extension = config["extension"]
@@ -2283,7 +2342,7 @@ def alfred_notes(query: str = "") -> None:
     if extension and default_rel.casefold().endswith(extension.casefold()):
         default_rel = default_rel[: -len(extension)]
 
-    query_cf = query.strip().casefold()
+    query = query.strip()
     items = []
     for path in root.rglob("*"):
         if not path.is_file():
@@ -2300,7 +2359,8 @@ def alfred_notes(query: str = "") -> None:
         if extension and rel.casefold().endswith(extension.casefold()):
             rel = rel[: -len(extension)]
 
-        if query_cf and query_cf not in rel.casefold():
+        score = fuzzy_score(query, rel, basename_bonus=True)
+        if score is None:
             continue
 
         is_default = rel.casefold() == default_rel.casefold()
@@ -2311,19 +2371,27 @@ def alfred_notes(query: str = "") -> None:
                 "arg": rel,
                 "match": rel,
                 "valid": True,
+                "_score": score,
                 "_is_default": is_default,
             }
         )
 
-    items.sort(key=lambda item: (not item["_is_default"], item["title"].casefold()))
+    # With no query, preserve the convenient default-note-first behaviour.
+    # Once searching, rank purely by fuzzy quality.
+    if query:
+        items.sort(key=lambda item: (-item["_score"], item["title"].casefold()))
+    else:
+        items.sort(key=lambda item: (not item["_is_default"], item["title"].casefold()))
+
     for item in items:
+        item.pop("_score", None)
         item.pop("_is_default", None)
 
     print(json.dumps({"skipknowledge": True, "items": items}))
 
-
 def alfred_contexts(query: str = "") -> None:
-    query = query.strip().lower()
+    """Emit fuzzy-ranked Alfred Script Filter JSON for contexts."""
+    query = query.strip()
     open_contexts = alfred_open_contexts()
 
     items = []
@@ -2342,10 +2410,17 @@ def alfred_contexts(query: str = "") -> None:
                 description,
                 *ctx.get("_aliases", []),
             ]
-        ).lower()
+        )
 
-        if query and query not in searchable:
+        # Score the visible name separately so a good name match beats a
+        # coincidental match spread through metadata, while aliases, ids and
+        # descriptions remain searchable.
+        name_score = fuzzy_score(query, name)
+        metadata_score = fuzzy_score(query, searchable)
+        scores = [score for score in (name_score, metadata_score) if score is not None]
+        if not scores:
             continue
+        score = max(scores) + (5_000 if name_score is not None else 0)
 
         open_space = open_contexts.get(context_id)
         subtitle = description or context_id
@@ -2359,20 +2434,21 @@ def alfred_contexts(query: str = "") -> None:
                 "subtitle": subtitle,
                 "arg": context_id,
                 "autocomplete": context_id,
-                "match": searchable,
+                "match": searchable.casefold(),
                 "valid": True,
+                "_score": score,
             }
         )
 
-    print(
-        json.dumps(
-            {
-                "skipknowledge": True,
-                "items": items,
-            }
-        )
-    )
+    if query:
+        items.sort(key=lambda item: (-item["_score"], item["title"].casefold()))
+    else:
+        items.sort(key=lambda item: item["title"].casefold())
 
+    for item in items:
+        item.pop("_score", None)
+
+    print(json.dumps({"skipknowledge": True, "items": items}))
 
 def alfred_close_contexts(query: str = "") -> None:
     """Emit Alfred Script Filter JSON for currently open contexts only.
@@ -3306,7 +3382,10 @@ def main() -> None:
         args = sys.argv[2:]
         if args and args[0] == "notes":
             alfred_notes(" ".join(args[1:]))
+        elif args and args[0] == "contexts":
+            alfred_contexts(" ".join(args[1:]))
         else:
+            # Backward compatibility for existing Alfred workflows.
             alfred_contexts(" ".join(args))
         return
 

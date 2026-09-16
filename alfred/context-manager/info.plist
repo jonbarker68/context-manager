@@ -99,7 +99,7 @@
 			<key>config</key>
 			<dict>
 				<key>alfredfiltersresults</key>
-				<true/>
+				<false/>
 				<key>alfredfiltersresultsmatchmode</key>
 				<integer>0</integer>
 				<key>argumenttreatemptyqueryasnil</key>
@@ -124,7 +124,7 @@
 				<string></string>
 				<key>script</key>
 				<string>cd /Users/jon/projects/context-manager
-/opt/homebrew/bin/uv run ctx alfred</string>
+/opt/homebrew/bin/uv run ctx alfred contexts "$1"</string>
 				<key>scriptargtype</key>
 				<integer>1</integer>
 				<key>scriptfile</key>
@@ -471,7 +471,7 @@ cd /Users/jon/projects/context-manager
 			<key>config</key>
 			<dict>
 				<key>alfredfiltersresults</key>
-				<true/>
+				<false/>
 				<key>alfredfiltersresultsmatchmode</key>
 				<integer>0</integer>
 				<key>argumenttreatemptyqueryasnil</key>
@@ -496,7 +496,7 @@ cd /Users/jon/projects/context-manager
 				<string></string>
 				<key>script</key>
 				<string>cd /Users/jon/projects/context-manager
-/opt/homebrew/bin/uv run ctx alfred notes
+/opt/homebrew/bin/uv run ctx alfred notes "$1"
 </string>
 				<key>scriptargtype</key>
 				<integer>1</integer>
