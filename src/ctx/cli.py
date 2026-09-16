@@ -40,6 +40,7 @@ DEFAULT_NOTES_CONFIG = {
     "root": "~/shared/notes/obsidian",
     "extension": ".md",
     "vscode_profile": "Foam Notes",
+    "default": "index.md",
 }
 
 DEFAULT_TODO_CONFIG = {
@@ -536,6 +537,10 @@ def notes_config() -> dict[str, str]:
         raise SystemExit(
             f"Invalid {CONTEXT_CONFIG_FILE}: notes.vscode_profile cannot be empty."
         )
+    if not result["default"].strip():
+        raise SystemExit(
+            f"Invalid {CONTEXT_CONFIG_FILE}: notes.default cannot be empty."
+        )
 
     return result
 
@@ -832,15 +837,113 @@ def current_context() -> dict[str, Any]:
     return resolve_context(context_id, fuzzy=False)
 
 
+def _open_note_paths(paths: list[Path]) -> None:
+    """Open note paths in the configured VS Code notes profile."""
+    config = notes_config()
+    subprocess.Popen(
+        [
+            find_code(),
+            "--profile",
+            config["vscode_profile"],
+            "--new-window",
+            *(str(path) for path in paths),
+        ],
+        start_new_session=True,
+    )
+
+
+def resolve_direct_note(expression: str) -> Path:
+    """Resolve one arbitrary note below notes.root, preferring exact matches."""
+    config = notes_config()
+    root = Path(os.path.expandvars(config["root"])).expanduser()
+    extension = config["extension"]
+
+    # Direct note opening should prefer an exact root-relative path before the
+    # more permissive note-pattern matching used by context note expressions.
+    # Try the expression as written, then with the configured extension.
+    expr = expression.strip().lstrip("/")
+    exact_candidates = [root / expr]
+    if extension and not expr.casefold().endswith(extension.casefold()):
+        exact_candidates.append(root / f"{expr}{extension}")
+
+    contexts_resolved = context_dir().resolve()
+    for candidate in exact_candidates:
+        if not candidate.is_file():
+            continue
+        candidate_resolved = candidate.resolve()
+        if (
+            candidate_resolved == contexts_resolved
+            or contexts_resolved in candidate_resolved.parents
+        ):
+            continue
+        return candidate
+
+    paths = resolve_note_paths({"notes": [expression]}, warn=False)
+
+    # If there is no exact path, prefer an exact basename/stem match. This
+    # makes `--open todo` select root-level todo.md rather than also matching
+    # archived notes such as todo-2024.md.
+    expr_name = Path(expr).name.casefold()
+    expr_stem = expr_name
+    if extension and expr_stem.endswith(extension.casefold()):
+        expr_stem = expr_stem[:-len(extension)]
+    basename_matches = [
+        path for path in paths
+        if path.name.casefold() == expr_name
+        or path.stem.casefold() == expr_stem
+    ]
+    if len(basename_matches) == 1:
+        return basename_matches[0]
+    if basename_matches:
+        paths = basename_matches
+
+    if len(paths) > 1:
+        matches = "\n".join(f"  {path.relative_to(root)}" for path in paths)
+        raise SystemExit(f"Ambiguous note '{expression}'. Matches:\n{matches}")
+    return paths[0]
+
+
 def note_command(args: list[str]) -> None:
-    """Open or print the notes attached to a context."""
+    """Open context notes, the configured root note, or a specific note."""
     print_only = False
     remaining = list(args)
     if "--print" in remaining:
         print_only = True
         remaining.remove("--print")
+
+    if "--root" in remaining:
+        if len(remaining) != 1:
+            raise SystemExit("Usage: ctx note [--print] --root")
+        path = resolve_direct_note(notes_config()["default"])
+        if print_only:
+            print(path)
+            return
+        _open_note_paths([path])
+        print(f"Opened default note: {path}")
+        return
+
+    if "--open" in remaining:
+        index = remaining.index("--open")
+        expression_parts = remaining[index + 1 :]
+        before = remaining[:index]
+        if before or not expression_parts or any(
+            arg.startswith("-") for arg in expression_parts
+        ):
+            raise SystemExit("Usage: ctx note [--print] --open <note>")
+        expression = " ".join(expression_parts)
+        path = resolve_direct_note(expression)
+        if print_only:
+            print(path)
+            return
+        _open_note_paths([path])
+        print(f"Opened note: {path}")
+        return
+
     if any(arg.startswith("-") for arg in remaining):
-        raise SystemExit("Usage: ctx note [--print] [name-or-alias]")
+        raise SystemExit(
+            "Usage: ctx note [--print] [name-or-alias] | "
+            "ctx note [--print] --root | ctx note [--print] --open <note>"
+        )
 
     ctx = resolve_context(" ".join(remaining)) if remaining else current_context()
     paths = resolve_note_paths(ctx)
@@ -854,17 +957,7 @@ def note_command(args: list[str]) -> None:
             print(path)
         return
 
-    config = notes_config()
-    subprocess.Popen(
-        [
-            find_code(),
-            "--profile",
-            config["vscode_profile"],
-            "--new-window",
-            *(str(path) for path in paths),
-        ],
-        start_new_session=True,
-    )
+    _open_note_paths(paths)
     if len(paths) == 1:
         print(f"Opened note for {name}: {paths[0]}")
     else:
@@ -2171,6 +2264,64 @@ def alfred_now_contexts(query: str = "") -> None:
     print(json.dumps({"skipknowledge": True, "items": items}))
 
 
+def alfred_notes(query: str = "") -> None:
+    """Emit Alfred Script Filter JSON for notes."""
+    config = notes_config()
+    root = Path(os.path.expandvars(config["root"])).expanduser()
+    extension = config["extension"]
+    contexts_root = context_dir().resolve()
+
+    if not root.is_dir():
+        raise SystemExit(f"Notes root does not exist or is not a directory: {root}")
+
+    root_resolved = root.resolve()
+    exclude_contexts = (
+        contexts_root == root_resolved or root_resolved in contexts_root.parents
+    )
+
+    default_rel = config["default"].strip().replace("\\", "/")
+    if extension and default_rel.casefold().endswith(extension.casefold()):
+        default_rel = default_rel[: -len(extension)]
+
+    query_cf = query.strip().casefold()
+    items = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if extension and not path.name.casefold().endswith(extension.casefold()):
+            continue
+        resolved = path.resolve()
+        if exclude_contexts and (
+            resolved == contexts_root or contexts_root in resolved.parents
+        ):
+            continue
+
+        rel = path.relative_to(root).as_posix()
+        if extension and rel.casefold().endswith(extension.casefold()):
+            rel = rel[: -len(extension)]
+
+        if query_cf and query_cf not in rel.casefold():
+            continue
+
+        is_default = rel.casefold() == default_rel.casefold()
+        items.append(
+            {
+                "title": rel,
+                "subtitle": "Open default note" if is_default else "Open note",
+                "arg": rel,
+                "match": rel,
+                "valid": True,
+                "_is_default": is_default,
+            }
+        )
+
+    items.sort(key=lambda item: (not item["_is_default"], item["title"].casefold()))
+    for item in items:
+        item.pop("_is_default", None)
+
+    print(json.dumps({"skipknowledge": True, "items": items}))
+
+
 def alfred_contexts(query: str = "") -> None:
     query = query.strip().lower()
     open_contexts = alfred_open_contexts()
@@ -2917,6 +3068,41 @@ def complete_contexts() -> None:
         print(f"{name}\t{description}")
 
 
+
+def complete_notes() -> None:
+    """Emit shell-friendly note completions as ROOT-RELATIVE-NAME\tDESCRIPTION."""
+    config = notes_config()
+    root = Path(os.path.expandvars(config["root"])).expanduser()
+    extension = config["extension"]
+    contexts_root = context_dir().resolve()
+
+    if not root.is_dir():
+        raise SystemExit(f"Notes root does not exist or is not a directory: {root}")
+
+    root_resolved = root.resolve()
+    exclude_contexts = (
+        contexts_root == root_resolved or root_resolved in contexts_root.parents
+    )
+
+    rows: list[str] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if extension and not path.name.casefold().endswith(extension.casefold()):
+            continue
+        resolved = path.resolve()
+        if exclude_contexts and (
+            resolved == contexts_root or contexts_root in resolved.parents
+        ):
+            continue
+        rel = path.relative_to(root).as_posix()
+        if extension and rel.casefold().endswith(extension.casefold()):
+            rel = rel[: -len(extension)]
+        rows.append(rel)
+
+    for rel in sorted(rows, key=str.casefold):
+        print(f"{rel}\tNote")
+
 def usage() -> None:
     print(
         """Usage:
@@ -2945,7 +3131,14 @@ def usage() -> None:
       matched below notes.root from ~/.config/ctx/config.yaml.
 
   ctx note --print [name-or-alias]
-      Print resolved note paths without opening them.
+      Print resolved context-note paths without opening them.
+
+  ctx note --root
+      Open notes.default from ~/.config/ctx/config.yaml.
+
+  ctx note --open <note>
+      Resolve and open one arbitrary note below notes.root. This namespace is
+      separate from context names and is suitable for shell/Alfred navigation.
 
   ctx todo <text> [--url <url>] [--date "YYYY-MM-DD HH:MM"]
       Add a Markdown task at the top of the configured todo inbox. The todo
@@ -3015,6 +3208,8 @@ Examples:
   ctx edit COM413
   ctx note COM413
   ctx note --print COM413
+  ctx note --root
+  ctx note --open todo
   ctx mark COM413
   ctx here
   ctx close COM413
@@ -3071,9 +3266,12 @@ def main() -> None:
         return
 
     if command == "_complete":
-        if len(sys.argv) != 3 or sys.argv[2] != "contexts":
-            raise SystemExit("Usage: ctx _complete contexts")
-        complete_contexts()
+        if len(sys.argv) != 3 or sys.argv[2] not in {"contexts", "notes"}:
+            raise SystemExit("Usage: ctx _complete contexts|notes")
+        if sys.argv[2] == "contexts":
+            complete_contexts()
+        else:
+            complete_notes()
         return
 
     if command == "edit":
@@ -3105,8 +3303,11 @@ def main() -> None:
         return
 
     if command == "alfred":
-        query = " ".join(sys.argv[2:])
-        alfred_contexts(query)
+        args = sys.argv[2:]
+        if args and args[0] == "notes":
+            alfred_notes(" ".join(args[1:]))
+        else:
+            alfred_contexts(" ".join(args))
         return
 
     if command == "alfred-now":
