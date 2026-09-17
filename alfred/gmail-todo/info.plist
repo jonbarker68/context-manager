@@ -32,6 +32,19 @@
 				<false/>
 			</dict>
 		</array>
+		<key>FED8E658-63A5-4CDD-863F-EC38C174E0DF</key>
+		<array>
+			<dict>
+				<key>destinationuid</key>
+				<string>8A9116AF-5D77-4815-B41C-7B9C18411E37</string>
+				<key>modifiers</key>
+				<integer>0</integer>
+				<key>modifiersubtext</key>
+				<string></string>
+				<key>vitoclose</key>
+				<false/>
+			</dict>
+		</array>
 	</dict>
 	<key>createdby</key>
 	<string></string>
@@ -148,6 +161,27 @@ fi</string>
 			<key>version</key>
 			<integer>1</integer>
 		</dict>
+		<dict>
+			<key>config</key>
+			<dict>
+				<key>argumenttype</key>
+				<integer>2</integer>
+				<key>keyword</key>
+				<string>todo</string>
+				<key>subtext</key>
+				<string></string>
+				<key>text</key>
+				<string>Generate todo from email</string>
+				<key>withspace</key>
+				<false/>
+			</dict>
+			<key>type</key>
+			<string>alfred.workflow.input.keyword</string>
+			<key>uid</key>
+			<string>FED8E658-63A5-4CDD-863F-EC38C174E0DF</string>
+			<key>version</key>
+			<integer>1</integer>
+		</dict>
 	</array>
 	<key>readme</key>
 	<string></string>
@@ -173,6 +207,13 @@ fi</string>
 			<real>270</real>
 			<key>ypos</key>
 			<real>210</real>
+		</dict>
+		<key>FED8E658-63A5-4CDD-863F-EC38C174E0DF</key>
+		<dict>
+			<key>xpos</key>
+			<real>280</real>
+			<key>ypos</key>
+			<real>440</real>
 		</dict>
 	</dict>
 	<key>userconfigurationconfig</key>

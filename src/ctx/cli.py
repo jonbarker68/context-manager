@@ -576,9 +576,9 @@ def todo_path() -> Path:
 
 
 def _todo_timestamp(value: str | None) -> str:
-    """Return a normalised todo timestamp, defaulting to local capture time."""
+    """Return a normalised todo creation date, defaulting to today."""
     if value is None:
-        return datetime.now().astimezone().strftime("%Y-%m-%d %H:%M")
+        return datetime.now().astimezone().strftime("%Y-%m-%d")
 
     try:
         parsed = datetime.fromisoformat(value)
@@ -587,7 +587,7 @@ def _todo_timestamp(value: str | None) -> str:
             "Invalid --date. Use an ISO date/time such as '2026-09-15 09:18'."
         ) from exc
 
-    return parsed.strftime("%Y-%m-%d %H:%M")
+    return parsed.strftime("%Y-%m-%d")
 
 
 def add_todo(text: str, *, url: str | None = None, date: str | None = None) -> Path:
@@ -600,13 +600,13 @@ def add_todo(text: str, *, url: str | None = None, date: str | None = None) -> P
     content = path.read_text()
     lines = content.splitlines(keepends=True)
 
-    heading_re = re.compile(rf"^##\s+{re.escape(section)}\s*$", re.IGNORECASE)
+    heading_re = re.compile(rf"^#+\s+{re.escape(section)}\s*$", re.IGNORECASE)
     heading_index = next(
         (i for i, line in enumerate(lines) if heading_re.match(line.rstrip("\r\n"))),
         None,
     )
     if heading_index is None:
-        raise SystemExit(f"Todo section '## {section}' not found in {path}")
+        raise SystemExit(f"Todo section '{section}' not found in {path}")
 
     task_text = text.strip()
     if not task_text:
@@ -618,9 +618,9 @@ def add_todo(text: str, *, url: str | None = None, date: str | None = None) -> P
         url = url.strip()
         if not url:
             raise SystemExit("--url cannot be empty.")
-        task_text += f" ([email]({url}))"
+        task_text += f" [email]({url})"
 
-    task = f"- [ ] {task_text} — {_todo_timestamp(date)}\n"
+    task = f"- [ ] {_todo_timestamp(date)} {task_text}\n"
 
     # Keep the conventional blank line immediately below the heading, then
     # insert before the existing inbox items so newest captures appear first.
