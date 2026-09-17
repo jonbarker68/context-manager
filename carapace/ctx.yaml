@@ -1,0 +1,64 @@
+# yaml-language-server: $schema=https://carapace.sh/schemas/command.json
+
+name: ctx
+description: Context manager
+
+commands:
+  - name: list
+    description: List available contexts
+
+  - name: now
+    description: Open the context for the current calendar event
+
+  - name: here
+    description: Open the context associated with the current directory
+
+  - name: open
+    description: Open a context
+    completion:
+      positional:
+        - ["$(ctx _complete contexts)"]
+
+  - name: close
+    description: Close a context
+    completion:
+      positional:
+        - ["$(ctx _complete contexts)"]
+
+  - name: edit
+    description: Edit a context descriptor
+    completion:
+      positional:
+        - ["$(ctx _complete contexts)"]
+
+  - name: note
+    description: Open notes for a context
+    flags:
+      --print: Print resolved note paths without opening them
+    completion:
+      positional:
+        - ["$(ctx _complete contexts)"]
+
+  - name: mark
+    description: Associate the current directory with a context
+    completion:
+      positional:
+        - ["$(ctx _complete contexts)"]
+
+  - name: unmark
+    description: Remove the context marker from the current directory
+
+  - name: ensure-ids
+    description: Add immutable IDs to context descriptors
+
+  - name: spaces
+    description: Show managed context Spaces and their occupancy
+
+  - name: clean
+    description: Review and clean orphan windows on unassigned context Spaces
+
+  - name: switch
+    description: Switch to an already-open context
+    completion:
+      positional:
+        - ["$(ctx _complete contexts)"]
