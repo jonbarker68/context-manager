@@ -324,9 +324,7 @@ def new_code_context(description: str | None = None) -> None:
         raise SystemExit("Description cannot be empty.")
 
     existing_ids = {
-        str(ctx["_stable_id"])
-        for ctx in iter_contexts()
-        if ctx.get("_stable_id")
+        str(ctx["_stable_id"]) for ctx in iter_contexts() if ctx.get("_stable_id")
     }
     context_id = generate_context_id(existing_ids)
     project_path = display_path(project_dir)
@@ -530,9 +528,7 @@ def notes_config() -> dict[str, str]:
     result["extension"] = extension
 
     if not result["root"].strip():
-        raise SystemExit(
-            f"Invalid {CONTEXT_CONFIG_FILE}: notes.root cannot be empty."
-        )
+        raise SystemExit(f"Invalid {CONTEXT_CONFIG_FILE}: notes.root cannot be empty.")
     if not result["vscode_profile"].strip():
         raise SystemExit(
             f"Invalid {CONTEXT_CONFIG_FILE}: notes.vscode_profile cannot be empty."
@@ -561,9 +557,7 @@ def todo_config() -> dict[str, str]:
             result[key] = str(value)
 
     if not result["file"].strip():
-        raise SystemExit(
-            f"Invalid {CONTEXT_CONFIG_FILE}: todo.file cannot be empty."
-        )
+        raise SystemExit(f"Invalid {CONTEXT_CONFIG_FILE}: todo.file cannot be empty.")
     if not result["section"].strip():
         raise SystemExit(
             f"Invalid {CONTEXT_CONFIG_FILE}: todo.section cannot be empty."
@@ -719,7 +713,7 @@ def _note_pattern_matches(relative_path: str, expression: str, extension: str) -
             return fnmatch.fnmatchcase(basename_lower, expr_with_ext)
         stem = basename_lower
         if extension and stem.endswith(ext_lower):
-            stem = stem[:-len(extension)]
+            stem = stem[: -len(extension)]
         return expr_lower in stem
 
     if anchored:
@@ -757,8 +751,7 @@ def resolve_note_paths(ctx: dict[str, Any], *, warn: bool = True) -> list[Path]:
     root_resolved = root.resolve()
     contexts_resolved = contexts_root.resolve()
     exclude_contexts = (
-        contexts_resolved == root_resolved
-        or root_resolved in contexts_resolved.parents
+        contexts_resolved == root_resolved or root_resolved in contexts_resolved.parents
     )
 
     candidates: list[Path] = []
@@ -806,6 +799,7 @@ def resolve_note_paths(ctx: dict[str, Any], *, warn: bool = True) -> list[Path]:
 
     return resolved
 
+
 def open_context_notes(ctx: dict[str, Any]) -> list[Path]:
     """Open all notes for a context in the configured VS Code profile."""
     paths = resolve_note_paths(ctx)
@@ -813,12 +807,15 @@ def open_context_notes(ctx: dict[str, Any]) -> list[Path]:
         return []
 
     config = notes_config()
+    root = Path(os.path.expandvars(config["root"])).expanduser()
+
     subprocess.Popen(
         [
             find_code(),
             "--profile",
             config["vscode_profile"],
-            "--new-window",
+            "--reuse-window",
+            str(root),
             *(str(path) for path in paths),
         ],
         start_new_session=True,
@@ -840,12 +837,15 @@ def current_context() -> dict[str, Any]:
 def _open_note_paths(paths: list[Path]) -> None:
     """Open note paths in the configured VS Code notes profile."""
     config = notes_config()
+    root = Path(os.path.expandvars(config["root"])).expanduser()
+
     subprocess.Popen(
         [
             find_code(),
             "--profile",
             config["vscode_profile"],
-            "--new-window",
+            "--reuse-window",
+            str(root),
             *(str(path) for path in paths),
         ],
         start_new_session=True,
@@ -886,11 +886,11 @@ def resolve_direct_note(expression: str) -> Path:
     expr_name = Path(expr).name.casefold()
     expr_stem = expr_name
     if extension and expr_stem.endswith(extension.casefold()):
-        expr_stem = expr_stem[:-len(extension)]
+        expr_stem = expr_stem[: -len(extension)]
     basename_matches = [
-        path for path in paths
-        if path.name.casefold() == expr_name
-        or path.stem.casefold() == expr_stem
+        path
+        for path in paths
+        if path.name.casefold() == expr_name or path.stem.casefold() == expr_stem
     ]
     if len(basename_matches) == 1:
         return basename_matches[0]
@@ -926,8 +926,10 @@ def note_command(args: list[str]) -> None:
         index = remaining.index("--open")
         expression_parts = remaining[index + 1 :]
         before = remaining[:index]
-        if before or not expression_parts or any(
-            arg.startswith("-") for arg in expression_parts
+        if (
+            before
+            or not expression_parts
+            or any(arg.startswith("-") for arg in expression_parts)
         ):
             raise SystemExit("Usage: ctx note [--print] --open <note>")
         expression = " ".join(expression_parts)
@@ -2297,13 +2299,9 @@ def fuzzy_score(query: str, text: str, *, basename_bonus: bool = False) -> int |
 
             span = positions[-1] - positions[0] + 1
             gaps = span - len(q)
-            consecutive = sum(
-                1 for a, b in zip(positions, positions[1:]) if b == a + 1
-            )
+            consecutive = sum(1 for a, b in zip(positions, positions[1:]) if b == a + 1)
             boundaries = sum(
-                1
-                for pos in positions
-                if pos == 0 or t[pos - 1] in "/-_ ."
+                1 for pos in positions if pos == 0 or t[pos - 1] in "/-_ ."
             )
             score = (
                 50_000
@@ -2389,6 +2387,7 @@ def alfred_notes(query: str = "") -> None:
 
     print(json.dumps({"skipknowledge": True, "items": items}))
 
+
 def alfred_contexts(query: str = "") -> None:
     """Emit fuzzy-ranked Alfred Script Filter JSON for contexts."""
     query = query.strip()
@@ -2449,6 +2448,7 @@ def alfred_contexts(query: str = "") -> None:
         item.pop("_score", None)
 
     print(json.dumps({"skipknowledge": True, "items": items}))
+
 
 def alfred_close_contexts(query: str = "") -> None:
     """Emit Alfred Script Filter JSON for currently open contexts only.
@@ -3030,9 +3030,11 @@ def clean_spaces() -> None:
             )
 
         while True:
-            choice = input(
-                "Move to main [m], close [c], ignore [i], quit [q] [m]: "
-            ).strip().lower()
+            choice = (
+                input("Move to main [m], close [c], ignore [i], quit [q] [m]: ")
+                .strip()
+                .lower()
+            )
             if choice == "":
                 choice = "m"
             if choice in {"m", "c", "i", "q"}:
@@ -3080,9 +3082,7 @@ def clean_spaces() -> None:
                     failures.append(window)
 
             return_label = (
-                original_label
-                if original_label and original_label != label
-                else "main"
+                original_label if original_label and original_label != label else "main"
             )
             try:
                 focus_space(return_label)
@@ -3144,7 +3144,6 @@ def complete_contexts() -> None:
         print(f"{name}\t{description}")
 
 
-
 def complete_notes() -> None:
     """Emit shell-friendly note completions as ROOT-RELATIVE-NAME\tDESCRIPTION."""
     config = notes_config()
@@ -3178,6 +3177,7 @@ def complete_notes() -> None:
 
     for rel in sorted(rows, key=str.casefold):
         print(f"{rel}\tNote")
+
 
 def usage() -> None:
     print(
