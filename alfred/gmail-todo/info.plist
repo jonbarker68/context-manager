@@ -98,33 +98,48 @@
 				<string>#!/bin/zsh
 
 CTX="/Users/jon/bin/ctx"
-
-title=$(osascript -e 'tell application "Google Chrome" to get title of active tab of front window')
-url=$(osascript -e 'tell application "Google Chrome" to get URL of active tab of front window')
+GMAIL_TOOLS="/Users/jon/bin/gmail-tools"
 
 # Must be Gmail
+url=$(osascript -e 'tell application "Google Chrome" to get URL of active tab of front window')
+
 if [[ "$url" != https://mail.google.com/mail/* ]]; then
     echo "❌ Current Chrome tab is not Gmail"
     exit 0
 fi
 
-# Must be an individual message
-fragment="${url#*#}"
+# Extract the thread ID and subject of the currently open Gmail conversation.
+gmail_info=$(osascript -e '
+tell application "Google Chrome"
+    tell active tab of front window
+        set js to "(() =&gt; { const el = document.querySelector('\''h2[data-legacy-thread-id]'\''); if (!el) return '\''NO_CONVERSATION'\''; return el.dataset.legacyThreadId + '\''|||'\'' + el.innerText.trim(); })()"
+        return execute javascript js
+    end tell
+end tell
+')
 
-if [[ "$fragment" != */* ]]; then
+if [[ "$gmail_info" == "NO_CONVERSATION" ]]; then
     echo "❌ No individual email is open"
     exit 0
 fi
 
-# Strip Gmail account/site suffix
-subject=$(printf '%s\n' "$title" |
-    sed -E 's/ - [^ ]+@[^ ]+ - University of Sheffield Mail$//')
+thread_id="${gmail_info%%|||*}"
+subject="${gmail_info#*|||}"
 
-# Add to TODO
+# Construct a stable Gmail link that does not depend on the current
+# inbox, label or search view.
+url="https://mail.google.com/mail/u/0/#all/$thread_id"
+
+# Add to TODO first.
 if "$CTX" todo "$subject" --url "$url" &gt;/dev/null 2&gt;&amp;1; then
-    echo "✓ Added to TODO: $subject"
+    # Only label Gmail if TODO capture succeeded.
+    if "$GMAIL_TOOLS" label todo &gt;/dev/null 2&gt;&amp;1; then
+        echo "✓ Added to TODO and labelled: $subject"
+    else
+        echo "⚠ Added to TODO, but Gmail labelling failed: $subject"
+    fi
 else
-    echo "❌ Failed to add: $subject"
+    echo "❌ Failed to add to TODO: $subject"
 fi</string>
 				<key>scriptargtype</key>
 				<integer>1</integer>
