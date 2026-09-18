@@ -801,25 +801,29 @@ def resolve_note_paths(ctx: dict[str, Any], *, warn: bool = True) -> list[Path]:
 
 
 def open_context_notes(ctx: dict[str, Any]) -> list[Path]:
-    """Open all notes for a context in the configured VS Code profile."""
+    """Open context notes in a fresh, isolated VS Code window.
+
+    Unlike interactive `ctx note`, context activation deliberately does not
+    open the notes root or reuse the persistent notes workspace.  The context
+    window contains only the note(s) explicitly associated with the context.
+    """
     paths = resolve_note_paths(ctx)
     if not paths:
         return []
 
     config = notes_config()
-    root = Path(os.path.expandvars(config["root"])).expanduser()
 
     subprocess.Popen(
         [
             find_code(),
             "--profile",
             config["vscode_profile"],
-            "--reuse-window",
-            str(root),
+            "--new-window",
             *(str(path) for path in paths),
         ],
         start_new_session=True,
     )
+
     return paths
 
 
@@ -2642,6 +2646,9 @@ def activate_context(
             print(f"Switched to {context_name} on {space}")
             return
 
+        # reconcile_space_state() may have changed spaces.json while validating
+        # this assignment, so reload before persisting our removal.
+        state = load_space_state()
         state.pop(space, None)
         save_space_state(state)
 
@@ -2674,8 +2681,11 @@ def activate_context(
         window.get("id") for window in all_windows() if window.get("id") is not None
     }
 
-    # Record allocation before launching, so a partially failed
-    # launch doesn't accidentally allow this Space to be reused.
+    # Record allocation before launching, so a partially failed launch doesn't
+    # accidentally allow this Space to be reused. Reload first: calls made while
+    # selecting/focusing the Space may have reconciled spaces.json independently,
+    # and saving an older in-memory dict would overwrite those changes.
+    state = load_space_state()
     state[free_space] = context_id
     save_space_state(state)
 
@@ -2683,6 +2693,9 @@ def activate_context(
         open_context(context_id, calendar_event=calendar_event)
         ensure_new_windows_on_space(free_space, existing_window_ids)
     except Exception:
+        # Likewise, remove only our allocation from the latest state rather than
+        # writing a potentially stale snapshot over other assignments.
+        state = load_space_state()
         state.pop(free_space, None)
         save_space_state(state)
         raise
