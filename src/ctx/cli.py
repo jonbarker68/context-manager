@@ -1068,9 +1068,9 @@ def open_context(
     for path in ctx.get("terminal", []):
         subprocess.Popen(
             [
-                "/Applications/kitty.app/Contents/MacOS/kitty",
-                "--single-instance",
-                "--directory",
+                "/usr/bin/open",
+                "-a",
+                "kitty",
                 expand(path),
             ],
             start_new_session=True,
