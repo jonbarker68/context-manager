@@ -1773,6 +1773,71 @@ def ensure_new_windows_on_space(
         time.sleep(poll_interval)
 
 
+
+
+def repair_spaces() -> None:
+    """Repair ctx Space labels and cached assignments conservatively.
+
+    This command deliberately does not create or delete macOS Spaces. Creating
+    Spaces through yabai requires its scripting addition, which ctx otherwise
+    does not depend on. If the physical topology is incomplete, explain the
+    required manual Mission Control repair instead.
+    """
+    spaces = yabai("query", "--spaces") or []
+    displays = yabai("query", "--displays") or []
+
+    if len(displays) == 1:
+        display_index = displays[0].get("index")
+        count = sum(1 for space in spaces if space.get("display") == display_index)
+
+        if count < 5:
+            missing = 5 - count
+            raise SystemExit(
+                f"Space repair needs manual action: found {count} Spaces; ctx expects 5.\n"
+                f"Create {missing} additional Desktop{'s' if missing != 1 else ''} "
+                "in Mission Control, then run 'ctx repair' again.\n"
+                "ctx will not create Spaces automatically because that requires "
+                "yabai's scripting addition."
+            )
+        if count > 5:
+            raise SystemExit(
+                f"Cannot repair Space layout safely: found {count} Spaces; ctx expects 5.\n"
+                "No Spaces were deleted. Remove any unwanted extra Desktop(s) in "
+                "Mission Control, then run 'ctx repair' again."
+            )
+
+        reconcile_space_topology()
+        reconcile_space_state()
+        print("Space repair complete: labels and cached assignments reconciled.")
+        return
+
+    if len(displays) == 2:
+        counts = {display.get("index"): 0 for display in displays}
+        for space in spaces:
+            display_index = space.get("display")
+            if display_index in counts:
+                counts[display_index] += 1
+
+        found = sorted(counts.values())
+        if found != [1, 5]:
+            raise SystemExit(
+                "Space repair needs manual action: "
+                f"found {found} Spaces per display; ctx expects [1, 5].\n"
+                "Adjust the Desktops in Mission Control so one display has 1 Space "
+                "and the context display has 5, then run 'ctx repair' again.\n"
+                "ctx will not create or delete Spaces automatically."
+            )
+
+        reconcile_space_topology()
+        reconcile_space_state()
+        print("Space repair complete: labels and cached assignments reconciled.")
+        return
+
+    raise SystemExit(
+        f"ctx currently supports one or two displays; found {len(displays)}."
+    )
+
+
 def reconcile_space_topology() -> None:
     """
     Ensure ctx Space labels match the current display topology.
@@ -1807,7 +1872,7 @@ def reconcile_space_topology() -> None:
             raise SystemExit(
                 "Unexpected Space layout for one display: "
                 f"expected 5 Spaces, found {len(display_spaces)}.\n"
-                "Refusing to relabel Spaces automatically."
+                "Run 'ctx repair' to restore the managed Space layout."
             )
 
         desired_labels = [
@@ -1866,7 +1931,7 @@ def reconcile_space_topology() -> None:
             raise SystemExit(
                 "Unexpected Space layout for two displays: "
                 f"found {counts} Spaces per display; expected [1, 5].\n"
-                "Refusing to relabel Spaces automatically."
+                "Run 'ctx repair' to restore the managed Space layout."
             )
 
         auxiliary_space = auxiliary_candidates[0][0]
@@ -3413,6 +3478,12 @@ def main() -> None:
         if len(sys.argv) != 2:
             raise SystemExit("Usage: ctx spaces")
         spaces_command()
+        return
+
+    if command == "repair":
+        if len(sys.argv) != 2:
+            raise SystemExit("Usage: ctx repair")
+        repair_spaces()
         return
 
     if command == "clean":

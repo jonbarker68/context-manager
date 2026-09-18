@@ -35,9 +35,11 @@ commands:
     description: Open notes for a context
     flags:
       --print: Print resolved note paths without opening them
+      --root: Open the configured root note
+      --open=: Open a note directly
     completion:
       positional:
-        - ["$(ctx _complete contexts)"]
+        - ["$(ctx _complete notes)"]
 
   - name: mark
     description: Associate the current directory with a context
@@ -48,11 +50,33 @@ commands:
   - name: unmark
     description: Remove the context marker from the current directory
 
+  - name: new
+    description: Create a context for the current code directory
+    flags:
+      --description=: Set the context description
+
+  - name: calendar
+    description: Manage calendar integration
+    commands:
+      - name: status
+        description: Show calendar integration status
+      - name: auth
+        description: Authorise calendar access
+
+  - name: todo
+    description: Add an item to the configured TODO inbox
+    flags:
+      --url=: Attach a URL
+      --date=: Set the item date (YYYY-MM-DD HH:MM)
+
   - name: ensure-ids
     description: Add immutable IDs to context descriptors
 
   - name: spaces
     description: Show managed context Spaces and their occupancy
+
+  - name: repair
+    description: Repair missing managed Spaces and reconcile labels/state
 
   - name: clean
     description: Review and clean orphan windows on unassigned context Spaces

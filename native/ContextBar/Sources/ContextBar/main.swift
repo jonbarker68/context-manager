@@ -66,6 +66,10 @@ final class CtxRunner: @unchecked Sendable {
         _ = try run(["close", id])
     }
 
+    func repairSpaces() throws {
+        _ = try run(["repair"])
+    }
+
     private func run(_ arguments: [String]) throws -> Data {
         let process = Process()
         let stdout = Pipe()
@@ -284,6 +288,10 @@ final class ContextBarController: NSObject, NSApplicationDelegate {
         refreshItem.target = self
         menu.addItem(refreshItem)
 
+        let repairItem = NSMenuItem(title: "Repair Spaces…", action: #selector(repairSpaces(_:)), keyEquivalent: "")
+        repairItem.target = self
+        menu.addItem(repairItem)
+
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(title: "Quit ContextBar", action: #selector(quit(_:)), keyEquivalent: "q")
@@ -311,6 +319,11 @@ final class ContextBarController: NSObject, NSApplicationDelegate {
         refresh()
     }
 
+    @objc private func repairSpaces(_ sender: NSMenuItem) {
+        guard let runner else { return }
+        runCommand { try runner.repairSpaces() }
+    }
+
     @objc private func quit(_ sender: NSMenuItem) {
         NSApp.terminate(nil)
     }
@@ -331,6 +344,14 @@ final class ContextBarController: NSObject, NSApplicationDelegate {
                     self?.errorMessage = error.localizedDescription
                     self?.refreshInProgress = false
                     self?.rebuildMenu()
+
+                    let alert = NSAlert()
+                    alert.alertStyle = .warning
+                    alert.messageText = "Context Manager"
+                    alert.informativeText = error.localizedDescription
+                    alert.addButton(withTitle: "OK")
+                    NSApp.activate(ignoringOtherApps: true)
+                    alert.runModal()
                 }
             }
         }
