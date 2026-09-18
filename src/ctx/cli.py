@@ -882,6 +882,26 @@ def resolve_direct_note(expression: str) -> Path:
             continue
         return candidate
 
+    # Explicit aliases are sparse human-facing lookup names.
+    q = expr.casefold()
+    alias_matches: list[Path] = []
+    for path in root.rglob("*"):
+        if not path.is_file():
+            continue
+        if extension and not path.name.casefold().endswith(extension.casefold()):
+            continue
+        resolved = path.resolve()
+        if resolved == contexts_resolved or contexts_resolved in resolved.parents:
+            continue
+        if any(alias.casefold() == q for alias in note_aliases(path)):
+            alias_matches.append(path)
+
+    if len(alias_matches) == 1:
+        return alias_matches[0]
+    if len(alias_matches) > 1:
+        matches = "\n".join(f"  {path.relative_to(root)}" for path in alias_matches)
+        raise SystemExit(f"Ambiguous note alias '{expression}'. Matches:\n{matches}")
+
     paths = resolve_note_paths({"notes": [expression]}, warn=False)
 
     # If there is no exact path, prefer an exact basename/stem match. This
@@ -2390,6 +2410,24 @@ def fuzzy_score(query: str, text: str, *, basename_bonus: bool = False) -> int |
     return score
 
 
+def note_aliases(path: Path, *, max_lines: int = 10) -> list[str]:
+    """Return explicit ``alias:`` values from the first few lines of a note."""
+    aliases: list[str] = []
+    try:
+        with path.open(encoding="utf-8") as handle:
+            for index, line in enumerate(handle):
+                if index >= max_lines:
+                    break
+                stripped = line.strip()
+                if stripped.casefold().startswith("alias:"):
+                    alias = stripped.split(":", 1)[1].strip()
+                    if alias:
+                        aliases.append(alias)
+    except (OSError, UnicodeError):
+        return []
+    return aliases
+
+
 def alfred_notes(query: str = "") -> None:
     """Emit fuzzy-ranked Alfred Script Filter JSON for notes."""
     config = notes_config()
@@ -2426,17 +2464,28 @@ def alfred_notes(query: str = "") -> None:
         if extension and rel.casefold().endswith(extension.casefold()):
             rel = rel[: -len(extension)]
 
-        score = fuzzy_score(query, rel, basename_bonus=True)
-        if score is None:
+        aliases = note_aliases(path)
+        scored_terms = [(rel, fuzzy_score(query, rel, basename_bonus=True))]
+        scored_terms.extend((alias, fuzzy_score(query, alias)) for alias in aliases)
+        scored_terms = [(term, score) for term, score in scored_terms if score is not None]
+        if not scored_terms:
             continue
 
+        matched_term, score = max(scored_terms, key=lambda item: item[1])
         is_default = rel.casefold() == default_rel.casefold()
+        if is_default:
+            subtitle = "Open default note"
+        elif matched_term != rel:
+            subtitle = f"Open note — alias: {matched_term}"
+        else:
+            subtitle = "Open note"
+
         items.append(
             {
                 "title": rel,
-                "subtitle": "Open default note" if is_default else "Open note",
+                "subtitle": subtitle,
                 "arg": rel,
-                "match": rel,
+                "match": " ".join([rel, *aliases]),
                 "valid": True,
                 "_score": score,
                 "_is_default": is_default,
@@ -3237,7 +3286,7 @@ def complete_notes() -> None:
         contexts_root == root_resolved or root_resolved in contexts_root.parents
     )
 
-    rows: list[str] = []
+    rows: list[tuple[str, list[str]]] = []
     for path in root.rglob("*"):
         if not path.is_file():
             continue
@@ -3251,10 +3300,12 @@ def complete_notes() -> None:
         rel = path.relative_to(root).as_posix()
         if extension and rel.casefold().endswith(extension.casefold()):
             rel = rel[: -len(extension)]
-        rows.append(rel)
+        rows.append((rel, note_aliases(path)))
 
-    for rel in sorted(rows, key=str.casefold):
+    for rel, aliases in sorted(rows, key=lambda item: item[0].casefold()):
         print(f"{rel}\tNote")
+        for alias in aliases:
+            print(f"{alias}\tNote alias -> {rel}")
 
 
 def usage() -> None:
