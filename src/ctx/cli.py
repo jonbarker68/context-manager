@@ -3055,41 +3055,69 @@ def complete_contexts() -> None:
         print(f"{name}\t{description}")
 
 
-def complete_notes() -> None:
-    """Emit shell-friendly note completions as ROOT-RELATIVE-NAME\tDESCRIPTION."""
+def discover_notes() -> list[tuple[str, Path]]:
+    """Return canonical notes as (root-relative name, absolute path).
+
+    This is the shared note-discovery implementation used by shell completion
+    and editor integrations. Context descriptor files are deliberately excluded.
+    """
     config = notes_config()
     root = Path(os.path.expandvars(config["root"])).expanduser()
-    extension = config["extension"]
-    contexts_root = context_dir().resolve()
 
     if not root.is_dir():
         raise SystemExit(f"Notes root does not exist or is not a directory: {root}")
 
+    extension = config["extension"]
+    contexts_root = context_dir().resolve()
     root_resolved = root.resolve()
     exclude_contexts = (
         contexts_root == root_resolved or root_resolved in contexts_root.parents
     )
 
-    rows: list[tuple[str, list[str]]] = []
+    notes: list[tuple[str, Path]] = []
     for path in root.rglob("*"):
         if not path.is_file():
             continue
+
+        # Hidden directories are application/configuration state rather than
+        # user notes (e.g. .obsidian, .git, .vscode).
+        relative_parts = path.relative_to(root).parts
+        if any(part.startswith(".") for part in relative_parts[:-1]):
+            continue
+
         if extension and not path.name.casefold().endswith(extension.casefold()):
             continue
+
         resolved = path.resolve()
         if exclude_contexts and (
             resolved == contexts_root or contexts_root in resolved.parents
         ):
             continue
+
         rel = path.relative_to(root).as_posix()
         if extension and rel.casefold().endswith(extension.casefold()):
             rel = rel[: -len(extension)]
-        rows.append((rel, note_aliases(path)))
+        notes.append((rel, resolved))
 
-    for rel, aliases in sorted(rows, key=lambda item: item[0].casefold()):
+    return sorted(notes, key=lambda item: item[0].casefold())
+
+
+def complete_notes() -> None:
+    """Emit shell-friendly note completions as ROOT-RELATIVE-NAME\tDESCRIPTION."""
+    for rel, path in discover_notes():
         print(f"{rel}\tNote")
-        for alias in aliases:
+        for alias in note_aliases(path):
             print(f"{alias}\tNote alias -> {rel}")
+
+
+def list_notes_for_integration() -> None:
+    """Emit canonical root-relative note names, one per line.
+
+    Private machine-facing API for integrations such as the CTX VS Code
+    extension. Interactive filtering is intentionally left to the client.
+    """
+    for rel, _path in discover_notes():
+        print(rel)
 
 
 def usage() -> None:
@@ -3264,6 +3292,12 @@ def main() -> None:
             complete_contexts()
         else:
             complete_notes()
+        return
+
+    if command == "_notes":
+        if len(sys.argv) != 2:
+            raise SystemExit("Usage: ctx _notes")
+        list_notes_for_integration()
         return
 
     if command == "edit":

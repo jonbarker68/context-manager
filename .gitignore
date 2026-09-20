@@ -12,3 +12,5 @@ wheels/
 native/calendar-query/calendar-query
 native/ContextBar/.build/
 native/ContextBar/ContextBar.app/
+
+*.vsix

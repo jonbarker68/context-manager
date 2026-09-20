@@ -1,0 +1,42 @@
+{
+  "name": "ctx",
+  "displayName": "CTX",
+  "description": "VS Code integration for the ctx context and notes manager.",
+  "version": "0.0.1",
+  "publisher": "local",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:ctx.fileTodo",
+    "onCommand:ctx.syncTodos"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "ctx.fileTodo",
+        "title": "CTX: File TODO\u2026"
+      },
+      {
+        "command": "ctx.syncTodos",
+        "title": "CTX: Sync TODOs"
+      }
+    ],
+    "configuration": {
+      "title": "CTX",
+      "properties": {
+        "ctx.command": {
+          "type": "string",
+          "default": "ctx",
+          "description": "Command or absolute path used to invoke the ctx CLI."
+        }
+      }
+    }
+  },
+  "scripts": {},
+  "license": "UNLICENSED"
+}
