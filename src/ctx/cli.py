@@ -30,23 +30,13 @@ except ImportError:
         get_calendar_provider,
     )
 
-CONTEXT_CONFIG_FILE = Path("~/.config/ctx/config.yaml").expanduser()
-
-DEFAULT_CONTEXTS_CONFIG = {
-    "root": "~/shared/notes/contexts",
-}
-
-DEFAULT_NOTES_CONFIG = {
-    "root": "~/shared/notes",
-    "extension": ".md",
-    "vscode_profile": "Foam Notes",
-    "default": "index.md",
-}
-
-DEFAULT_TODO_CONFIG = {
-    "file": "todo.md",
-    "section": "Inbox",
-}
+try:
+    from .config import context_dir, notes_config
+    from .todo import todo_command
+except ImportError:
+    # Allows direct execution of cli.py during development.
+    from config import context_dir, notes_config
+    from todo import todo_command
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 STATE_DIR = Path("~/.local/share/ctx").expanduser()
@@ -463,212 +453,6 @@ def activate_here() -> None:
 
 def expand(path: str) -> str:
     return str(Path(os.path.expandvars(path)).expanduser())
-
-
-def read_context_config() -> dict[str, Any]:
-    """Read optional global ctx configuration from ~/.config/ctx/config.yaml."""
-    if not CONTEXT_CONFIG_FILE.exists():
-        return {}
-
-    try:
-        data = yaml.safe_load(CONTEXT_CONFIG_FILE.read_text()) or {}
-    except (OSError, yaml.YAMLError) as exc:
-        raise SystemExit(f"Unable to read {CONTEXT_CONFIG_FILE}: {exc}") from exc
-
-    if not isinstance(data, dict):
-        raise SystemExit(f"Invalid {CONTEXT_CONFIG_FILE}: expected a YAML mapping.")
-    return data
-
-
-def contexts_config() -> dict[str, str]:
-    """Return resolved global settings for context descriptor storage."""
-    config = read_context_config()
-    configured = config.get("contexts") or {}
-    if not isinstance(configured, dict):
-        raise SystemExit(
-            f"Invalid {CONTEXT_CONFIG_FILE}: 'contexts' must be a YAML mapping."
-        )
-
-    result = {**DEFAULT_CONTEXTS_CONFIG}
-    for key in result:
-        value = configured.get(key)
-        if value is not None:
-            result[key] = str(value)
-
-    if not result["root"].strip():
-        raise SystemExit(
-            f"Invalid {CONTEXT_CONFIG_FILE}: contexts.root cannot be empty."
-        )
-    return result
-
-
-def context_dir() -> Path:
-    """Return the configured context descriptor root."""
-    return Path(os.path.expandvars(contexts_config()["root"])).expanduser()
-
-
-def notes_config() -> dict[str, str]:
-    """Return resolved global settings for context notes."""
-    config = read_context_config()
-    configured = config.get("notes") or {}
-    if not isinstance(configured, dict):
-        raise SystemExit(
-            f"Invalid {CONTEXT_CONFIG_FILE}: 'notes' must be a YAML mapping."
-        )
-
-    result = {**DEFAULT_NOTES_CONFIG}
-    for key in result:
-        value = configured.get(key)
-        if value is not None:
-            result[key] = str(value)
-
-    extension = result["extension"].strip()
-    if extension and not extension.startswith("."):
-        extension = f".{extension}"
-    result["extension"] = extension
-
-    if not result["root"].strip():
-        raise SystemExit(f"Invalid {CONTEXT_CONFIG_FILE}: notes.root cannot be empty.")
-    if not result["vscode_profile"].strip():
-        raise SystemExit(
-            f"Invalid {CONTEXT_CONFIG_FILE}: notes.vscode_profile cannot be empty."
-        )
-    if not result["default"].strip():
-        raise SystemExit(
-            f"Invalid {CONTEXT_CONFIG_FILE}: notes.default cannot be empty."
-        )
-
-    return result
-
-
-def todo_config() -> dict[str, str]:
-    """Return resolved settings for the Markdown todo inbox."""
-    config = read_context_config()
-    configured = config.get("todo") or {}
-    if not isinstance(configured, dict):
-        raise SystemExit(
-            f"Invalid {CONTEXT_CONFIG_FILE}: 'todo' must be a YAML mapping."
-        )
-
-    result = {**DEFAULT_TODO_CONFIG}
-    for key in result:
-        value = configured.get(key)
-        if value is not None:
-            result[key] = str(value)
-
-    if not result["file"].strip():
-        raise SystemExit(f"Invalid {CONTEXT_CONFIG_FILE}: todo.file cannot be empty.")
-    if not result["section"].strip():
-        raise SystemExit(
-            f"Invalid {CONTEXT_CONFIG_FILE}: todo.section cannot be empty."
-        )
-    return result
-
-
-def todo_path() -> Path:
-    """Return the configured todo file, relative to notes.root unless absolute."""
-    configured = Path(os.path.expandvars(todo_config()["file"])).expanduser()
-    if configured.is_absolute():
-        return configured
-
-    notes_root = Path(os.path.expandvars(notes_config()["root"])).expanduser()
-    return notes_root / configured
-
-
-def _todo_timestamp(value: str | None) -> str:
-    """Return a normalised todo creation date, defaulting to today."""
-    if value is None:
-        return datetime.now().astimezone().strftime("%Y-%m-%d")
-
-    try:
-        parsed = datetime.fromisoformat(value)
-    except ValueError as exc:
-        raise SystemExit(
-            "Invalid --date. Use an ISO date/time such as '2026-09-15 09:18'."
-        ) from exc
-
-    return parsed.strftime("%Y-%m-%d")
-
-
-def add_todo(text: str, *, url: str | None = None, date: str | None = None) -> Path:
-    """Prepend one task to the configured Markdown todo inbox."""
-    path = todo_path()
-    if not path.is_file():
-        raise SystemExit(f"Todo file does not exist: {path}")
-
-    section = todo_config()["section"].strip()
-    content = path.read_text()
-    lines = content.splitlines(keepends=True)
-
-    heading_re = re.compile(rf"^#+\s+{re.escape(section)}\s*$", re.IGNORECASE)
-    heading_index = next(
-        (i for i, line in enumerate(lines) if heading_re.match(line.rstrip("\r\n"))),
-        None,
-    )
-    if heading_index is None:
-        raise SystemExit(f"Todo section '{section}' not found in {path}")
-
-    task_text = text.strip()
-    if not task_text:
-        raise SystemExit("Todo text cannot be empty.")
-    if "\n" in task_text or "\r" in task_text:
-        raise SystemExit("Todo text must be a single line.")
-
-    if url is not None:
-        url = url.strip()
-        if not url:
-            raise SystemExit("--url cannot be empty.")
-        task_text += f" [email]({url})"
-
-    task = f"- [ ] {_todo_timestamp(date)} {task_text}\n"
-
-    # Keep the conventional blank line immediately below the heading, then
-    # insert before the existing inbox items so newest captures appear first.
-    insert_at = heading_index + 1
-    if insert_at < len(lines) and not lines[insert_at].strip():
-        insert_at += 1
-
-    lines.insert(insert_at, task)
-    path.write_text("".join(lines))
-    return path
-
-
-def todo_command(args: list[str]) -> None:
-    """Capture a task at the top of the configured todo inbox."""
-    text_parts: list[str] = []
-    url: str | None = None
-    date: str | None = None
-    i = 0
-
-    while i < len(args):
-        arg = args[i]
-        if arg in {"--url", "--date"}:
-            if i + 1 >= len(args):
-                raise SystemExit(
-                    'Usage: ctx todo <text> [--url <url>] [--date "YYYY-MM-DD HH:MM"]'
-                )
-            value = args[i + 1]
-            if arg == "--url":
-                url = value
-            else:
-                date = value
-            i += 2
-            continue
-        if arg.startswith("-"):
-            raise SystemExit(
-                'Usage: ctx todo <text> [--url <url>] [--date "YYYY-MM-DD HH:MM"]'
-            )
-        text_parts.append(arg)
-        i += 1
-
-    text = " ".join(text_parts).strip()
-    if not text:
-        raise SystemExit(
-            'Usage: ctx todo <text> [--url <url>] [--date "YYYY-MM-DD HH:MM"]'
-        )
-
-    path = add_todo(text, url=url, date=date)
-    print(f"Added todo to {path}")
 
 
 def normalise_notes(value: Any) -> list[str]:
@@ -3346,9 +3130,12 @@ def usage() -> None:
       separate from context names and is suitable for shell/Alfred navigation.
 
   ctx todo <text> [--url <url>] [--date "YYYY-MM-DD HH:MM"]
-      Add a Markdown task at the top of the configured todo inbox. The todo
-      file is relative to notes.root unless an absolute path is configured.
-      Without --date, the local capture time is used.
+  ctx todo add <text> [--url <url>] [--date "YYYY-MM-DD HH:MM"]
+      Add a Markdown task at the top of the configured todo inbox. The
+      historical form without 'add' remains supported.
+
+  ctx todo scan|sync|file ...
+      Reserved TODO workflow subcommands. These are introduced incrementally.
 
   ctx mark <name-or-alias>
       Write a .ctx marker in the current directory containing the context's

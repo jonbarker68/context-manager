@@ -64,10 +64,26 @@ commands:
         description: Authorise calendar access
 
   - name: todo
-    description: Add an item to the configured TODO inbox
+    description: Capture and synchronise TODO items
     flags:
-      --url=: Attach a URL
-      --date=: Set the item date (YYYY-MM-DD HH:MM)
+      --url=: Attach a URL (legacy direct capture form)
+      --date=: Set the item date (YYYY-MM-DD HH:MM; legacy direct capture form)
+    commands:
+      - name: add
+        description: Add an item to the configured TODO inbox
+        flags:
+          --url=: Attach a URL
+          --date=: Set the item date (YYYY-MM-DD HH:MM)
+      - name: scan
+        description: Report unchecked project TODOs under ## TODO headings
+      - name: sync
+        description: Assign TODO IDs and synchronise project ghosts
+      - name: file
+        description: File a TODO into a project note and leave a ghost in place
+        flags:
+          --source=: Source Markdown note
+          --line=: One-based source line number
+          --destination=: Destination project note
 
   - name: ensure-ids
     description: Add immutable IDs to context descriptors
