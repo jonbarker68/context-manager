@@ -31,7 +31,7 @@ def add_todo(text: str, *, url: str | None = None, date: str | None = None) -> P
     if not path.is_file():
         raise SystemExit(f"Todo file does not exist: {path}")
 
-    section = todo_config()["section"].strip()
+    section = todo_config()["capture_section"].strip()
     content = path.read_text()
     lines = content.splitlines(keepends=True)
 
