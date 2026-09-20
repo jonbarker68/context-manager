@@ -39,7 +39,7 @@ Gmail-to-TODO capture from Alfred.
 Context files live inside the notes tree:
 
 ``` text
-~/notes/obsidian/contexts/
+~/notes/contexts/
 ```
 
 A typical context resembles:
