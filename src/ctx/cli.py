@@ -33,11 +33,11 @@ except ImportError:
 CONTEXT_CONFIG_FILE = Path("~/.config/ctx/config.yaml").expanduser()
 
 DEFAULT_CONTEXTS_CONFIG = {
-    "root": "~/shared/notes/obsidian/contexts",
+    "root": "~/shared/notes/contexts",
 }
 
 DEFAULT_NOTES_CONFIG = {
-    "root": "~/shared/notes/obsidian",
+    "root": "~/shared/notes",
     "extension": ".md",
     "vscode_profile": "Foam Notes",
     "default": "index.md",
